@@ -1,0 +1,16 @@
+# Accepted dependency risks register.
+#
+# Format:  <advisory-id>  <expiry-date YYYY-MM-DD>  <reason>
+#
+# RULES ENFORCED BY THE PIPELINE:
+#   * Every entry MUST have an expiry date.
+#   * When the date passes, the build FAILS until the entry is renewed with a
+#     fresh justification or the dependency is patched.
+#
+# This is the mechanism that prevents "temporarily accepted" turning into
+# "permanently ignored". It is worth describing in the interview: the hard
+# part of vulnerability management is not finding CVEs, it is preventing the
+# exception list from growing without bound.
+#
+# Example (commented out - there is nothing accepted right now):
+# GHSA-xxxx-yyyy-zzzz  2026-03-31  No upstream fix; exploit needs local file write which the read-only rootfs prevents.

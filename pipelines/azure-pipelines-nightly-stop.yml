@@ -1,0 +1,157 @@
+# ===========================================================================
+# Nightly cost guard.
+#
+# Stops the dev AKS cluster and PostgreSQL server every evening. This is the
+# single highest-value automation in the whole repository for a learning
+# subscription: the way people overspend on cloud is almost never a big
+# obvious mistake, it is something cheap that nobody turned off.
+#
+# Effect: dev goes from roughly USD 4.30/day to under USD 0.30/day overnight.
+#
+# The AKS control plane is free on the Free tier, so `az aks stop` takes the
+# largest line item to zero while keeping every piece of cluster
+# configuration - node pools, identities, add-ons, RBAC - exactly as it was.
+#
+# Set up the schedule in the Azure DevOps UI as well as here: YAML schedules
+# only take effect once the pipeline has run at least once.
+# ===========================================================================
+
+name: nightly-stop-$(Date:yyyyMMdd)
+
+trigger: none
+pr: none
+
+schedules:
+  - cron: "30 16 * * *" # 16:30 UTC = 22:00 IST
+    displayName: Stop dev resources at 22:00 IST
+    branches:
+      include:
+        - main
+    always: true # run even when nothing has changed
+
+parameters:
+  - name: environment
+    displayName: Environment to stop
+    type: string
+    default: dev
+    values:
+      - dev
+      - test
+  - name: action
+    displayName: Action
+    type: string
+    default: stop
+    values:
+      - stop
+      - start
+
+variables:
+  - template: templates/variables-common.yml
+  - name: serviceConnection
+    value: sc-erp-${{ parameters.environment }}-wif
+  - name: aksCluster
+    value: aks-erp-${{ parameters.environment }}-cin-01
+  - name: aksResourceGroup
+    value: rg-erp-${{ parameters.environment }}-cin-aks
+  - name: pgServer
+    value: psql-erp-${{ parameters.environment }}-cin-01
+  - name: pgResourceGroup
+    value: rg-erp-${{ parameters.environment }}-cin-data
+
+pool:
+  vmImage: ubuntu-latest
+
+jobs:
+  - job: power
+    displayName: ${{ parameters.action }} ${{ parameters.environment }} compute
+    steps:
+      - checkout: none
+
+      - task: AzureCLI@2
+        displayName: ${{ parameters.action }} AKS and PostgreSQL
+        inputs:
+          azureSubscription: $(serviceConnection)
+          scriptType: bash
+          scriptLocation: inlineScript
+          inlineScript: |
+            set -uo pipefail
+            ACTION="${{ parameters.action }}"
+
+            # ------------------------------------------------------------ AKS
+            # Check the current power state first. Calling stop on an already
+            # stopped cluster is an error, not a no-op, and would fail the run
+            # every night after the first.
+            STATE=$(az aks show -g "$(aksResourceGroup)" -n "$(aksCluster)" \
+                      --query powerState.code -o tsv 2>/dev/null || echo "NotFound")
+            echo "AKS $(aksCluster) power state: ${STATE}"
+
+            if [ "$STATE" = "NotFound" ]; then
+              echo "##vso[task.logissue type=warning]Cluster not found - nothing to do."
+            elif [ "$ACTION" = "stop" ] && [ "$STATE" = "Running" ]; then
+              echo "Stopping AKS..."
+              az aks stop -g "$(aksResourceGroup)" -n "$(aksCluster)" --no-wait
+            elif [ "$ACTION" = "start" ] && [ "$STATE" = "Stopped" ]; then
+              echo "Starting AKS..."
+              az aks start -g "$(aksResourceGroup)" -n "$(aksCluster)" --no-wait
+            else
+              echo "AKS already in the desired state - nothing to do."
+            fi
+
+            # ----------------------------------------------------- PostgreSQL
+            # NOTE: a stopped Flexible Server restarts ITSELF after 7 days.
+            # It is a pause, not an indefinite stop.
+            PG_STATE=$(az postgres flexible-server show \
+                         -g "$(pgResourceGroup)" -n "$(pgServer)" \
+                         --query state -o tsv 2>/dev/null || echo "NotFound")
+            echo "PostgreSQL $(pgServer) state: ${PG_STATE}"
+
+            if [ "$PG_STATE" = "NotFound" ]; then
+              echo "##vso[task.logissue type=warning]Server not found - nothing to do."
+            elif [ "$ACTION" = "stop" ] && [ "$PG_STATE" = "Ready" ]; then
+              echo "Stopping PostgreSQL..."
+              az postgres flexible-server stop -g "$(pgResourceGroup)" -n "$(pgServer)" --no-wait
+            elif [ "$ACTION" = "start" ] && [ "$PG_STATE" = "Stopped" ]; then
+              echo "Starting PostgreSQL..."
+              az postgres flexible-server start -g "$(pgResourceGroup)" -n "$(pgServer)" --no-wait
+            else
+              echo "PostgreSQL already in the desired state - nothing to do."
+            fi
+
+      - task: AzureCLI@2
+        displayName: Report what is still billing
+        condition: always()
+        inputs:
+          azureSubscription: $(serviceConnection)
+          scriptType: bash
+          scriptLocation: inlineScript
+          inlineScript: |
+            set -uo pipefail
+            echo "=============================================================="
+            echo " Resources still billing by the hour"
+            echo "=============================================================="
+
+            # The expensive opt-ins should normally be absent entirely.
+            FW=$(az network firewall list --query "length(@)" -o tsv 2>/dev/null || echo 0)
+            if [ "$FW" -gt 0 ]; then
+              echo "##vso[task.logissue type=warning]Azure Firewall is deployed (~USD 30/day). Set enable_firewall=false unless an exercise needs it."
+              az network firewall list --query '[].{name:name, tier:sku.tier}' -o table
+            fi
+
+            AGW=$(az network application-gateway list --query "length(@)" -o tsv 2>/dev/null || echo 0)
+            if [ "$AGW" -gt 0 ]; then
+              echo "##vso[task.logissue type=warning]Application Gateway is deployed (~USD 6/day)."
+              az network application-gateway list --query '[].{name:name, tier:sku.tier}' -o table
+            fi
+
+            echo "--- unattached public IPs (pure waste) ---"
+            az network public-ip list \
+              --query "[?ipConfiguration==null].{name:name, rg:resourceGroup}" -o table
+
+            echo "--- unattached disks (pure waste) ---"
+            az disk list \
+              --query "[?diskState=='Unattached'].{name:name, gb:diskSizeGb}" -o table
+
+            echo "--- Log Analytics daily caps ---"
+            az monitor log-analytics workspace list \
+              --query '[].{name:name, capGB:workspaceCapping.dailyQuotaGb, retentionDays:retentionInDays}' \
+              -o table

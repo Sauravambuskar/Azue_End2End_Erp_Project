@@ -1,0 +1,57 @@
+# ===========================================================================
+# Infrastructure-as-Code scanning.
+#
+# Checkov covers Terraform, Kubernetes manifests, Helm charts and Dockerfiles
+# with one tool and one baseline file. tfsec/trivy-config overlap heavily, so
+# one is enough; the value is in the SKIP comments being code-reviewed.
+# ===========================================================================
+steps:
+  - task: UsePythonVersion@0
+    inputs:
+      versionSpec: "3.12"
+
+  - script: pip install --quiet checkov==$(checkovVersion)
+    displayName: Install Checkov (pinned)
+
+  - script: |
+      set -euo pipefail
+      mkdir -p $(Build.ArtifactStagingDirectory)/iac
+
+      # Terraform
+      checkov -d infra/terraform \
+        --framework terraform \
+        --output sarif --output-file-path $(Build.ArtifactStagingDirectory)/iac \
+        --soft-fail \
+        --quiet || true
+
+      # Kubernetes + Helm. Helm charts are rendered first, because scanning
+      # raw templates produces noise from the {{ }} placeholders.
+      helm template erp k8s/helm/erp -f k8s/helm/erp/values-prod.yaml \
+        --set azure.workloadIdentity.api.clientId=00000000-0000-0000-0000-000000000000 \
+        --set azure.tenantId=00000000-0000-0000-0000-000000000000 \
+        --set config.keyVault.name=placeholder \
+        > $(Agent.TempDirectory)/rendered.yaml
+
+      checkov -f $(Agent.TempDirectory)/rendered.yaml \
+        --framework kubernetes \
+        --compact --quiet --soft-fail || true
+    displayName: Checkov scan (report)
+
+  - script: |
+      set -euo pipefail
+      # The gate. Specific checks are skipped with a written reason; a bare
+      # --skip-check with no justification should fail code review.
+      checkov -d infra/terraform \
+        --framework terraform \
+        --compact --quiet \
+        --skip-check CKV_AZURE_4,CKV_AZURE_6,CKV_TF_1
+      #   CKV_AZURE_4  AKS logging - handled by the diagnostic setting module
+      #   CKV_AZURE_6  API server authorized ranges - parameterised per env
+      #   CKV_TF_1     module commit-hash pinning - modules are in-repo
+    displayName: Checkov gate
+
+  - publish: $(Build.ArtifactStagingDirectory)/iac
+    artifact: iac-reports
+    displayName: Publish IaC reports
+    condition: succeededOrFailed()
+    continueOnError: true

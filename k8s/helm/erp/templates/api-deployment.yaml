@@ -1,0 +1,164 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "erp.name" . }}-api
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "erp.labels" . | nindent 4 }}
+    app.kubernetes.io/component: api
+  annotations:
+    # Forces a rollout when only the ConfigMap changed - otherwise pods keep
+    # the stale config until something else triggers a restart.
+    checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+spec:
+  {{- if not .Values.api.autoscaling.enabled }}
+  replicas: {{ .Values.api.replicaCount }}
+  {{- end }}
+  revisionHistoryLimit: 3
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0        # zero-downtime: never drop below desired count
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "erp.name" . }}
+      app.kubernetes.io/component: api
+  template:
+    metadata:
+      labels:
+        {{- include "erp.labels" . | nindent 8 }}
+        app.kubernetes.io/component: api
+        # REQUIRED by workload identity: the webhook only mutates pods
+        # carrying this label.
+        azure.workload.identity/use: "true"
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: {{ .Values.api.port | quote }}
+        prometheus.io/path: /metrics
+    spec:
+      serviceAccountName: erp-api-sa
+      automountServiceAccountToken: false
+      securityContext:
+        {{- include "erp.podSecurityContext" . | nindent 8 }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- if .Values.topologySpreadEnabled }}
+      # Spread replicas across zones so one zone outage cannot take the API
+      # down. ScheduleAnyway, not DoNotSchedule, so a single-zone dev cluster
+      # still schedules.
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: {{ include "erp.name" . }}
+              app.kubernetes.io/component: api
+      {{- end }}
+      # Give in-flight requests time to finish before the container dies.
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: api
+          image: {{ include "erp.image" (dict "registry" .Values.image.registry "repository" "erp-api" "tag" .Values.image.tag) }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.api.port }}
+              protocol: TCP
+          securityContext:
+            {{- include "erp.containerSecurityContext" . | nindent 12 }}
+          env:
+            - name: ERP_ENV
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ include "erp.name" . }}-config
+                  key: env
+            - name: ERP_LOG_LEVEL
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ include "erp.name" . }}-config
+                  key: log_level
+            - name: ERP_AUTH_ENABLED
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ include "erp.name" . }}-config
+                  key: auth_enabled
+            - name: ERP_BUILD_VERSION
+              value: {{ .Values.image.tag | quote }}
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            # With managed identity, the DB *username* is the identity's
+            # name, created in PostgreSQL by pgaadauth_create_principal.
+            - name: ERP_DB_USER
+              value: {{ printf "id-erp-api-%s" .Values.config.env | quote }}
+            {{- include "erp.dbEnv" . | nindent 12 }}
+            {{- if .Values.config.keyVault.enabled }}
+            - name: ERP_KEY_VAULT_URI
+              value: {{ printf "https://%s.vault.azure.net/" .Values.config.keyVault.name | quote }}
+            - name: ERP_APPINSIGHTS_CONNECTION_STRING
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.config.appInsights.secretName }}
+                  key: appinsights-connection-string
+            {{- end }}
+          resources:
+            {{- toYaml .Values.api.resources | nindent 12 }}
+          # Three distinct probes. startupProbe gives a slow cold start room
+          # without making liveness tolerant of real hangs.
+          startupProbe:
+            httpGet:
+              path: /healthz/live
+              port: http
+            failureThreshold: 30
+            periodSeconds: 2
+          livenessProbe:
+            httpGet:
+              path: /healthz/live
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /healthz/ready
+              port: http
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 2
+            successThreshold: 1
+          volumeMounts:
+            # readOnlyRootFilesystem means we must mount writable tmpfs for
+            # anything the process writes.
+            - name: tmp
+              mountPath: /tmp
+            {{- if .Values.config.keyVault.enabled }}
+            - name: secrets-store
+              mountPath: /mnt/secrets
+              readOnly: true
+            {{- end }}
+      volumes:
+        - name: tmp
+          emptyDir:
+            medium: Memory
+            sizeLimit: 64Mi
+        {{- if .Values.config.keyVault.enabled }}
+        - name: secrets-store
+          csi:
+            driver: secrets-store.csi.k8s.io
+            readOnly: true
+            volumeAttributes:
+              secretProviderClass: erp-keyvault
+        {{- end }}

@@ -1,0 +1,37 @@
+# Dev overrides: smallest footprint that still exercises every control.
+config:
+  env: dev
+  logLevel: DEBUG
+  authEnabled: false
+  db:
+    useManagedIdentity: true
+    sslmode: require
+  keyVault:
+    enabled: false
+
+api:
+  replicaCount: 1
+  autoscaling:
+    enabled: true
+    minReplicas: 1
+    maxReplicas: 4
+  podDisruptionBudget:
+    enabled: false   # 1 replica + a PDB would block node drains
+
+web:
+  replicaCount: 1
+  autoscaling:
+    enabled: true
+    minReplicas: 1
+    maxReplicas: 3
+
+worker:
+  schedule: "*/15 * * * *"
+
+ingress:
+  enabled: false     # use kubectl port-forward in dev
+
+networkPolicy:
+  enabled: true      # keep ON: this is what you are here to learn
+
+topologySpreadEnabled: false   # single-zone dev cluster

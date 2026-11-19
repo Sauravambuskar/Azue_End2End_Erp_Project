@@ -1,0 +1,99 @@
+# ===========================================================================
+# Reusable job: Python lint + type-check + unit tests with coverage gate.
+# Consumed by any team whose service is Python.
+# ===========================================================================
+parameters:
+  - name: name
+    type: string
+  - name: displayName
+    type: string
+  - name: workingDirectory
+    type: string
+  - name: coverageThreshold
+    type: number
+    default: 70
+  - name: pythonVersion
+    type: string
+    default: "3.12"
+
+jobs:
+  - job: ${{ parameters.name }}
+    displayName: ${{ parameters.displayName }}
+    pool:
+      vmImage: ubuntu-latest
+    steps:
+      - checkout: self
+        fetchDepth: 1
+
+      - task: UsePythonVersion@0
+        displayName: Use Python ${{ parameters.pythonVersion }}
+        inputs:
+          versionSpec: ${{ parameters.pythonVersion }}
+
+      # Caching cuts a 90-second install to ~5 seconds on warm runs.
+      - task: Cache@2
+        displayName: Cache pip
+        inputs:
+          key: 'pip | "$(Agent.OS)" | ${{ parameters.workingDirectory }}/requirements-dev.txt'
+          restoreKeys: |
+            pip | "$(Agent.OS)"
+          path: $(Pipeline.Workspace)/.pip
+
+      - script: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          pip install --cache-dir "$(Pipeline.Workspace)/.pip" -r requirements-dev.txt
+        workingDirectory: ${{ parameters.workingDirectory }}
+        displayName: Install dependencies
+
+      - script: ruff check . --output-format=junit --output-file=ruff-junit.xml || true
+        workingDirectory: ${{ parameters.workingDirectory }}
+        displayName: Lint (ruff)
+
+      - script: ruff check .
+        workingDirectory: ${{ parameters.workingDirectory }}
+        displayName: Lint gate - fail on any violation
+
+      - script: mypy app --ignore-missing-imports
+        workingDirectory: ${{ parameters.workingDirectory }}
+        displayName: Type check (mypy)
+        continueOnError: true
+
+      - script: pytest
+        workingDirectory: ${{ parameters.workingDirectory }}
+        displayName: Unit tests with coverage
+        env:
+          ERP_ENV: test
+          ERP_AUTH_ENABLED: "false"
+
+      - task: PublishTestResults@2
+        displayName: Publish test results
+        condition: succeededOrFailed()
+        inputs:
+          testResultsFormat: JUnit
+          testResultsFiles: ${{ parameters.workingDirectory }}/junit.xml
+          testRunTitle: ${{ parameters.displayName }}
+          failTaskOnFailedTests: true
+
+      - task: PublishCodeCoverageResults@2
+        displayName: Publish coverage
+        condition: succeededOrFailed()
+        inputs:
+          summaryFileLocation: ${{ parameters.workingDirectory }}/coverage.xml
+          failIfCoverageEmpty: true
+
+      - script: |
+          set -euo pipefail
+          # Coverage gate enforced in the pipeline, not only in pytest config,
+          # so the threshold is visible to anyone reading the pipeline.
+          pct=$(python - <<'PY'
+          import xml.etree.ElementTree as ET
+          root = ET.parse("coverage.xml").getroot()
+          print(round(float(root.get("line-rate", 0)) * 100, 2))
+          PY
+          )
+          echo "Line coverage: ${pct}%  (threshold ${{ parameters.coverageThreshold }}%)"
+          awk -v p="$pct" -v t="${{ parameters.coverageThreshold }}" \
+            'BEGIN { if (p+0 < t+0) { print "##vso[task.logissue type=error]Coverage " p "% is below threshold " t "%"; exit 1 } }'
+        workingDirectory: ${{ parameters.workingDirectory }}
+        displayName: Coverage gate

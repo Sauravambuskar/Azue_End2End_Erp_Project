@@ -1,0 +1,116 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "erp.name" . }}-web
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "erp.labels" . | nindent 4 }}
+    app.kubernetes.io/component: web
+  annotations:
+    checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+spec:
+  {{- if not .Values.web.autoscaling.enabled }}
+  replicas: {{ .Values.web.replicaCount }}
+  {{- end }}
+  revisionHistoryLimit: 3
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "erp.name" . }}
+      app.kubernetes.io/component: web
+  template:
+    metadata:
+      labels:
+        {{- include "erp.labels" . | nindent 8 }}
+        app.kubernetes.io/component: web
+        azure.workload.identity/use: "true"
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: {{ .Values.web.port | quote }}
+        prometheus.io/path: /metrics
+    spec:
+      serviceAccountName: erp-web-sa
+      automountServiceAccountToken: false
+      # The node:20-alpine base image runs as uid 1000 ("node"), not the
+      # 10001 used by the Python images, so this one is spelled out.
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: web
+          image: {{ include "erp.image" (dict "registry" .Values.image.registry "repository" "erp-web" "tag" .Values.image.tag) }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.web.port }}
+              protocol: TCP
+          securityContext:
+            {{- include "erp.containerSecurityContext" . | nindent 12 }}
+            # The node image runs as uid 1000 ("node"), not 10001.
+            runAsUser: 1000
+            runAsGroup: 1000
+          env:
+            - name: NODE_ENV
+              value: production
+            - name: PORT
+              value: {{ .Values.web.port | quote }}
+            - name: ERP_ENV
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ include "erp.name" . }}-config
+                  key: env
+            - name: ERP_API_BASE
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ include "erp.name" . }}-config
+                  key: api_base
+            - name: ERP_AUTH_ENABLED
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ include "erp.name" . }}-config
+                  key: auth_enabled
+            - name: ERP_BUILD_VERSION
+              value: {{ .Values.image.tag | quote }}
+          resources:
+            {{- toYaml .Values.web.resources | nindent 12 }}
+          startupProbe:
+            httpGet:
+              path: /healthz/live
+              port: http
+            failureThreshold: 20
+            periodSeconds: 2
+          livenessProbe:
+            httpGet:
+              path: /healthz/live
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /healthz/ready
+              port: http
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 3
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir:
+            medium: Memory
+            sizeLimit: 32Mi

@@ -1,0 +1,54 @@
+name: Validate Repository
+
+on:
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      
+      - name: Install dependencies
+        run: |
+          pip install ruff bandit pytest
+          npm install -g eslint
+      
+      - name: Run Ruff
+        run: |
+          ruff check src/erp-api src/erp-worker || true
+      
+      - name: Run Bandit
+        run: |
+          bandit -r src/erp-api/app src/erp-worker/app -ll || true
+      
+      - name: Terraform Format Check
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.6.0
+      
+      - name: Terraform Format
+        run: |
+          terraform fmt -check -recursive infra/terraform/ || true
+      
+      - name: Check YAML files
+        run: |
+          python scripts/_check_yaml.py || true
+      
+      - name: Check Markdown links
+        run: |
+          python scripts/_check_links.py || true
+

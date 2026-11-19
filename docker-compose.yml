@@ -1,0 +1,104 @@
+# ===========================================================================
+# Local development stack. Runs the whole ERP on your laptop with no Azure
+# account at all, so you can learn the application before you learn the cloud.
+#
+#   docker compose up -d
+#   open http://localhost:3000
+#
+# What is deliberately DIFFERENT from Azure:
+#   * PostgreSQL uses a password (Azure uses Entra ID tokens)
+#   * no Key Vault, no App Insights, no WAF
+#   * auth is disabled so you can click around
+# Everything else - the images, the migrations, the business logic - is the
+# same code that runs on AKS.
+# ===========================================================================
+name: contoso-erp
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: erp-postgres
+    environment:
+      POSTGRES_DB: erp
+      POSTGRES_USER: erpadmin
+      # Local only. The gitleaks allowlist has an exception for this string.
+      POSTGRES_PASSWORD: localpw
+      POSTGRES_INITDB_ARGS: "--encoding=UTF8 --locale=C"
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      # Migrations run in filename order on first start of an empty volume.
+      - ./db/migrations/V001__initial_schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+      - ./db/migrations/V003__reporting_views.sql:/docker-entrypoint-initdb.d/02-views.sql:ro
+      - ./db/seed/seed.sql:/docker-entrypoint-initdb.d/03-seed.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U erpadmin -d erp"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  api:
+    build:
+      context: ./src/erp-api
+      args:
+        BUILD_VERSION: local-dev
+    container_name: erp-api
+    environment:
+      ERP_ENV: dev
+      ERP_LOG_LEVEL: DEBUG
+      ERP_AUTH_ENABLED: "false"
+      ERP_DB_HOST: postgres
+      ERP_DB_PORT: "5432"
+      ERP_DB_NAME: erp
+      ERP_DB_USER: erpadmin
+      ERP_DB_PASSWORD: localpw
+      ERP_DB_USE_MANAGED_IDENTITY: "false"
+      ERP_DB_SSLMODE: disable
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+  web:
+    build:
+      context: ./src/erp-web
+      args:
+        BUILD_VERSION: local-dev
+    container_name: erp-web
+    environment:
+      NODE_ENV: production
+      PORT: "3000"
+      ERP_ENV: dev
+      ERP_API_BASE: http://api:8000
+      ERP_AUTH_ENABLED: "false"
+    ports:
+      - "3000:3000"
+    depends_on:
+      - api
+    restart: unless-stopped
+
+  # Runs once on demand:  docker compose run --rm worker
+  worker:
+    build:
+      context: ./src/erp-worker
+    container_name: erp-worker
+    environment:
+      ERP_LOG_LEVEL: INFO
+      ERP_WORKER_JOB: all
+      ERP_DB_HOST: postgres
+      ERP_DB_NAME: erp
+      ERP_DB_USER: erpadmin
+      ERP_DB_PASSWORD: localpw
+      ERP_DB_USE_MANAGED_IDENTITY: "false"
+      ERP_DB_SSLMODE: disable
+    depends_on:
+      postgres:
+        condition: service_healthy
+    profiles: [tools]
+
+volumes:
+  pgdata:

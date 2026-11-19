@@ -1,0 +1,77 @@
+{
+  "properties": {
+    "displayName": "ERP - Data services must not allow public network access",
+    "policyType": "Custom",
+    "mode": "Indexed",
+    "description": "Storage accounts, Key Vaults, container registries and PostgreSQL servers must have public network access disabled, forcing all traffic through private endpoints. Assign this as Audit at the dev management group so you can still push images from a laptop, and as Deny at prod.",
+    "metadata": {
+      "version": "1.0.0",
+      "category": "Network",
+      "owner": "security@contoso.com"
+    },
+    "parameters": {
+      "effect": {
+        "type": "String",
+        "allowedValues": ["Audit", "Deny", "Disabled"],
+        "defaultValue": "Audit",
+        "metadata": {
+          "displayName": "Effect",
+          "description": "Audit in dev, Deny in prod."
+        }
+      }
+    },
+    "policyRule": {
+      "if": {
+        "anyOf": [
+          {
+            "allOf": [
+              { "field": "type", "equals": "Microsoft.Storage/storageAccounts" },
+              {
+                "anyOf": [
+                  {
+                    "field": "Microsoft.Storage/storageAccounts/publicNetworkAccess",
+                    "notEquals": "Disabled"
+                  },
+                  {
+                    "field": "Microsoft.Storage/storageAccounts/allowBlobPublicAccess",
+                    "notEquals": "false"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "allOf": [
+              { "field": "type", "equals": "Microsoft.KeyVault/vaults" },
+              {
+                "field": "Microsoft.KeyVault/vaults/publicNetworkAccess",
+                "notEquals": "Disabled"
+              }
+            ]
+          },
+          {
+            "allOf": [
+              { "field": "type", "equals": "Microsoft.ContainerRegistry/registries" },
+              {
+                "field": "Microsoft.ContainerRegistry/registries/publicNetworkAccess",
+                "notEquals": "Disabled"
+              }
+            ]
+          },
+          {
+            "allOf": [
+              { "field": "type", "equals": "Microsoft.DBforPostgreSQL/flexibleServers" },
+              {
+                "field": "Microsoft.DBforPostgreSQL/flexibleServers/network.publicNetworkAccess",
+                "notEquals": "Disabled"
+              }
+            ]
+          }
+        ]
+      },
+      "then": {
+        "effect": "[parameters('effect')]"
+      }
+    }
+  }
+}

@@ -1,0 +1,75 @@
+# ===========================================================================
+# Reusable job: Node lint + dependency audit.
+# ===========================================================================
+parameters:
+  - name: name
+    type: string
+  - name: displayName
+    type: string
+  - name: workingDirectory
+    type: string
+  - name: nodeVersion
+    type: string
+    default: "20.x"
+
+jobs:
+  - job: ${{ parameters.name }}
+    displayName: ${{ parameters.displayName }}
+    pool:
+      vmImage: ubuntu-latest
+    steps:
+      - checkout: self
+        fetchDepth: 1
+
+      - task: NodeTool@0
+        displayName: Use Node ${{ parameters.nodeVersion }}
+        inputs:
+          versionSpec: ${{ parameters.nodeVersion }}
+
+      - task: Cache@2
+        displayName: Cache npm
+        inputs:
+          key: 'npm | "$(Agent.OS)" | ${{ parameters.workingDirectory }}/package-lock.json'
+          path: $(Pipeline.Workspace)/.npm
+
+      - script: |
+          set -euo pipefail
+          npm config set cache "$(Pipeline.Workspace)/.npm"
+          # npm ci (not npm install): installs exactly the lock file, which is
+          # what makes the build reproducible and the SBOM meaningful.
+          npm ci --ignore-scripts
+        workingDirectory: ${{ parameters.workingDirectory }}
+        displayName: npm ci
+
+      - script: npx eslint src --max-warnings 0
+        workingDirectory: ${{ parameters.workingDirectory }}
+        displayName: ESLint (incl. eslint-plugin-security)
+
+      - script: npm test
+        workingDirectory: ${{ parameters.workingDirectory }}
+        displayName: Unit tests (node:test)
+        env:
+          ERP_ENV: test
+          ERP_AUTH_ENABLED: "false"
+
+      - script: |
+          set -euo pipefail
+          # High and above fails the build. Production deps only: a dev-only
+          # advisory never reaches the running container.
+          npm audit --audit-level=high --omit=dev
+        workingDirectory: ${{ parameters.workingDirectory }}
+        displayName: npm audit gate
+
+      - script: |
+          set -euo pipefail
+          npm sbom --sbom-format cyclonedx --omit=dev > sbom-web.cdx.json 2>/dev/null \
+            || echo "npm sbom unavailable on this npm version; Trivy generates the SBOM instead"
+        workingDirectory: ${{ parameters.workingDirectory }}
+        displayName: Generate SBOM (CycloneDX)
+        continueOnError: true
+
+      - publish: ${{ parameters.workingDirectory }}/sbom-web.cdx.json
+        artifact: sbom-web
+        displayName: Publish SBOM
+        condition: succeededOrFailed()
+        continueOnError: true

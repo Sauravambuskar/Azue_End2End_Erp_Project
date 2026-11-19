@@ -1,0 +1,21 @@
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "S", "UP", "SIM"]
+ignore = []
+
+[tool.ruff.lint.per-file-ignores]
+# S101 = assert used. That is the point of a test file.
+# S105/S106 = "possible hardcoded password". The test fixtures contain fake
+#   tokens and passwords on purpose - that is how you assert that the real
+#   code handles them. Scoped to tests/ only, never to app/.
+"tests/*" = ["S101", "S105", "S106"]
+
+[tool.pytest.ini_options]
+addopts = "-q --cov=app --cov-report=term-missing --cov-report=xml --junitxml=junit.xml"
+testpaths = ["tests"]
+
+[tool.bandit]
+exclude_dirs = ["tests"]

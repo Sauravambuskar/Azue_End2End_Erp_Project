@@ -1,0 +1,87 @@
+# ===========================================================================
+# SAST - static application security testing.
+#
+# Two tools on purpose:
+#   * Bandit   - Python-specific, understands Django/Flask/FastAPI patterns,
+#                catches things like subprocess with shell=True.
+#   * Semgrep  - multi-language with a maintained OWASP ruleset; catches
+#                cross-cutting issues in both the Python and the JS code.
+#
+# Defence of "two tools": they have genuinely different detection models.
+# Running two overlapping linters would be waste; these do not overlap much.
+# ===========================================================================
+parameters:
+  - name: name
+    type: string
+    default: sast
+  - name: failOnSeverity
+    type: string
+    default: HIGH
+    values: [LOW, MEDIUM, HIGH]
+
+jobs:
+  - job: ${{ parameters.name }}
+    displayName: SAST (Bandit + Semgrep)
+    pool:
+      vmImage: ubuntu-latest
+    steps:
+      - checkout: self
+        fetchDepth: 1
+
+      - task: UsePythonVersion@0
+        inputs:
+          versionSpec: "3.12"
+
+      - script: pip install --quiet bandit[sarif]==1.8.0 semgrep==1.101.0
+        displayName: Install SAST tools
+
+      # ------------------------------------------------------------- bandit
+      - script: |
+          set -euo pipefail
+          mkdir -p $(Build.ArtifactStagingDirectory)/sast
+          bandit -r src/erp-api/app src/erp-worker/app \
+            -f sarif -o $(Build.ArtifactStagingDirectory)/sast/bandit.sarif \
+            --exit-zero
+          # Human-readable copy in the log
+          bandit -r src/erp-api/app src/erp-worker/app -f txt --exit-zero
+        displayName: Bandit scan
+
+      - script: |
+          set -euo pipefail
+          SEV="${{ parameters.failOnSeverity }}"
+          case "$SEV" in
+            LOW)    FLAGS="-l"   ;;
+            MEDIUM) FLAGS="-ll"  ;;
+            HIGH)   FLAGS="-lll" ;;
+          esac
+          echo "Failing on Bandit severity >= $SEV"
+          bandit -r src/erp-api/app src/erp-worker/app $FLAGS
+        displayName: Bandit gate
+
+      # ------------------------------------------------------------ semgrep
+      - script: |
+          set -euo pipefail
+          semgrep scan \
+            --config p/owasp-top-ten \
+            --config p/secrets \
+            --config p/dockerfile \
+            --sarif --output $(Build.ArtifactStagingDirectory)/sast/semgrep.sarif \
+            --metrics off \
+            src/ || true
+        displayName: Semgrep scan
+
+      - script: |
+          set -euo pipefail
+          semgrep scan \
+            --config p/owasp-top-ten \
+            --config p/dockerfile \
+            --severity ERROR \
+            --error \
+            --metrics off \
+            src/
+        displayName: Semgrep gate - fail on ERROR severity
+
+      - publish: $(Build.ArtifactStagingDirectory)/sast
+        artifact: sast-reports
+        displayName: Publish SAST reports
+        condition: succeededOrFailed()

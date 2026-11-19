@@ -1,0 +1,179 @@
+# ===========================================================================
+# Custom Semgrep rules for ContosoERP.
+#
+# WHY CUSTOM RULES MATTER
+# The default rulesets catch generic classes of bug. These encode decisions
+# specific to THIS codebase - the mistakes a new contributor would plausibly
+# make here, and which no generic ruleset knows about.
+#
+# In a real team, every rule in this file should trace back to either an
+# incident or a code-review comment you got tired of repeating. That is a much
+# better answer to "how do you do SAST?" than "we run the default ruleset".
+#
+# Run:
+#   semgrep scan --config security/sast/semgrep-erp.yml src/
+#
+# Test a rule before you trust it:
+#   semgrep scan --config security/sast/semgrep-erp.yml --test security/sast/
+# ===========================================================================
+rules:
+  # -------------------------------------------------------------------- A03
+  - id: erp-no-sql-fstring
+    patterns:
+      - pattern-either:
+          - pattern: $DB.execute(text(f"..."))
+          - pattern: $DB.execute(text("..." % ...))
+          - pattern: $DB.execute(text("..." + ...))
+    message: >-
+      SQL built by string interpolation. Use bound parameters instead:
+      db.execute(text("SELECT ... WHERE id = :id"), {"id": value}).
+      Every query in app/services.py uses the SQLAlchemy expression language
+      or bound parameters; there is no reason for a new one to differ.
+    languages: [python]
+    severity: ERROR
+    metadata:
+      cwe: "CWE-89: Improper Neutralization of Special Elements used in an SQL Command"
+      owasp: "A03:2021 Injection"
+      confidence: HIGH
+
+  # -------------------------------------------------------------------- A05
+  - id: erp-no-wildcard-cors-with-credentials
+    patterns:
+      - pattern: |
+          CORSMiddleware(..., allow_origins=["*"], ..., allow_credentials=True, ...)
+    message: >-
+      Wildcard CORS origin combined with allow_credentials is a security
+      misconfiguration: any site can make authenticated cross-origin requests.
+      app/main.py restricts origins by environment - keep it that way.
+    languages: [python]
+    severity: ERROR
+    metadata:
+      owasp: "A05:2021 Security Misconfiguration"
+
+  - id: erp-no-debug-true
+    patterns:
+      - pattern-either:
+          - pattern: uvicorn.run(..., debug=True, ...)
+          - pattern: $APP.run(..., debug=True, ...)
+    message: >-
+      Debug mode exposes an interactive traceback console. Never ship it.
+    languages: [python]
+    severity: ERROR
+    metadata:
+      owasp: "A05:2021 Security Misconfiguration"
+
+  # -------------------------------------------------------------------- A02
+  - id: erp-no-tls-verification-disabled
+    patterns:
+      - pattern-either:
+          - pattern: requests.$METHOD(..., verify=False, ...)
+          - pattern: httpx.$METHOD(..., verify=False, ...)
+          - pattern: httpx.Client(..., verify=False, ...)
+    message: >-
+      TLS certificate verification disabled. This makes the connection
+      trivially interceptable. If a private CA is the problem, point
+      verify= at the CA bundle rather than turning verification off.
+    languages: [python]
+    severity: ERROR
+    metadata:
+      cwe: "CWE-295: Improper Certificate Validation"
+      owasp: "A02:2021 Cryptographic Failures"
+
+  # ------------------------------------------- project-specific conventions
+  - id: erp-no-password-in-connection-string
+    patterns:
+      # The character classes exclude { and } so an f-string or template
+      # placeholder does NOT match - only a LITERAL password does.
+      #
+      # The first version of this rule omitted that, and it fired on
+      # app/core/config.py's parameterised local-development URL, which is
+      # exactly the kind of false positive that gets a SAST rule deleted
+      # instead of fixed. Validate a new rule against the whole repo before
+      # you trust it.
+      - pattern-regex: 'postgres(ql)?(\+\w+)?://[^:/\s"{}]+:[^@/\s"{}]{4,}@'
+      - pattern-not-regex: '\$\{'
+      - pattern-not-regex: 'localpw'
+    message: >-
+      A PostgreSQL URI with an inline password. This platform authenticates to
+      the database with Entra ID tokens through workload identity - see
+      app/core/db.py. If you genuinely need a password, it belongs in Key
+      Vault, not in a connection string.
+    languages: [python, javascript, yaml]
+    severity: ERROR
+    metadata:
+      cwe: "CWE-798: Use of Hard-coded Credentials"
+
+  - id: erp-gl-entry-must-not-be-mutated
+    patterns:
+      - pattern-either:
+          - pattern: $DB.query(GLEntry).$M(...).delete(...)
+          - pattern: $DB.query(GLEntry).$M(...).update(...)
+          - pattern: $DB.delete($X)
+      - pattern-inside: |
+          def $FUNC(...):
+            ...
+      - metavariable-regex:
+          metavariable: $DB
+          regex: '(db|session)'
+    message: >-
+      The general ledger is APPEND-ONLY. A posting is never edited or deleted;
+      a correction is a new balanced reversing batch. The database enforces
+      this for the application role (see db/migrations/V002), so this code
+      would fail at runtime anyway - but it should not reach runtime.
+    languages: [python]
+    severity: WARNING
+    metadata:
+      category: "business-integrity"
+
+  - id: erp-no-print-statements
+    patterns:
+      - pattern: print(...)
+      - pattern-not-inside: |
+          if __name__ == "__main__":
+            ...
+    message: >-
+      Use the structured logger, not print(). Logs are parsed as JSON by the
+      Log Analytics KQL queries in guidance/11; a bare print() is invisible to
+      them and to App Insights.
+    languages: [python]
+    severity: INFO
+    paths:
+      exclude:
+        - "**/tests/**"
+        - "**/scripts/**"
+
+  # ------------------------------------------------------- Node / BFF tier
+  - id: erp-bff-no-wildcard-proxy
+    patterns:
+      - pattern-either:
+          - pattern: |
+              fetch(`${$BASE}${$REQ.params.$ANY}`, ...)
+          - pattern: |
+              fetch($REQ.query.url, ...)
+          - pattern: |
+              fetch($REQ.body.url, ...)
+    message: >-
+      Building an upstream URL from request input is SSRF. The BFF in
+      src/erp-web/src/server.js proxies only an explicit ALLOWED map of
+      resources, with a regex on the sub-path. Keep the allow-list; never
+      forward a caller-supplied URL.
+    languages: [javascript, typescript]
+    severity: ERROR
+    metadata:
+      cwe: "CWE-918: Server-Side Request Forgery"
+      owasp: "A10:2021 Server-Side Request Forgery"
+
+  - id: erp-no-innerhtml-with-user-data
+    patterns:
+      - pattern-either:
+          - pattern: $EL.innerHTML = `...${...}...`
+          - pattern: $EL.innerHTML = $X + $Y
+    message: >-
+      Assigning interpolated content to innerHTML is a stored-XSS path. The UI
+      in public/app.js escapes every value with esc() before it is rendered -
+      the DAST stage specifically probes for XSS via product names.
+    languages: [javascript]
+    severity: WARNING
+    metadata:
+      cwe: "CWE-79: Cross-site Scripting"
+      owasp: "A03:2021 Injection"

@@ -1,0 +1,49 @@
+# PRODUCTION values. Copy to terraform.tfvars (gitignored) and fill in.
+#
+# READ guidance/13-cost-and-teardown.md FIRST. With the firewall and App
+# Gateway enabled, this environment costs roughly USD 35/day.
+
+location    = "centralindia"
+owner_email = "platform-engineering@contoso.com"
+cost_centre = "CC-PLATFORM-001"
+
+# A different /16 from dev so both spokes can peer to one hub.
+hub_cidr   = "10.0.0.0/16"
+spoke_cidr = "10.20.0.0/16"
+
+# For a PRIVATE cluster this is only used for Key Vault network ACLs during
+# bootstrap. Day to day, access is via Bastion or a self-hosted agent.
+my_public_ip = null
+
+kubernetes_version = "1.31"
+node_vm_size       = "Standard_D4s_v5"
+postgres_sku       = "GP_Standard_D2ds_v5"
+log_daily_quota_gb = 10
+
+# GROUPS, never individual users, in production.
+#   az ad group show -g "grp-erp-platform-admins" --query id -o tsv
+aks_admin_group_object_ids = ["00000000-0000-0000-0000-000000000000"]
+
+#   az ad group show -g "grp-erp-dba" --query id -o tsv
+db_aad_admin_object_id      = "00000000-0000-0000-0000-000000000000"
+db_aad_admin_principal_name = "grp-erp-dba"
+
+# Object id of the Azure DevOps service connection's app registration.
+ci_service_principal_object_id = "00000000-0000-0000-0000-000000000000"
+
+k8s_namespace = "erp"
+enable_cosmos = true
+
+# Human access, always via groups, with a written justification per grant.
+group_role_assignments = {
+  # platform_admins = {
+  #   object_id     = "..."
+  #   role          = "Contributor"
+  #   scope         = "/subscriptions/.../resourceGroups/rg-erp-prod-cin-aks"
+  #   justification = "Platform team operates the cluster; on-call needs it at 3am."
+  # }
+}
+
+# NOTE: postgres_admin_password is NOT here and is not needed.
+# Production has password auth DISABLED - Entra ID is the only way in.
+# Run scripts/db-grant-identities.sh prod BEFORE the first application deploy.

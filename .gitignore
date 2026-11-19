@@ -1,0 +1,118 @@
+# ===========================================================================
+# ContosoERP .gitignore
+#
+# Every line here corresponds to a real way people leak credentials.
+# Read guidance/08-azure-devops-setup.md section 3 before changing it.
+# ===========================================================================
+
+# --- Terraform -------------------------------------------------------------
+# State contains the ACTUAL VALUES of everything Terraform manages, including
+# passwords and connection strings, in plain text. `sensitive = true` hides a
+# value from the console; it does NOT encrypt state.
+*.tfstate
+*.tfstate.*
+*.tfstate.backup
+.terraform/
+crash.log
+crash.*.log
+tfplan
+tfplan.json
+tfplan.txt
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+
+# Variable and backend files hold IPs, object ids and sometimes passwords.
+*.tfvars
+*.tfvars.json
+backend.hcl
+!*.tfvars.example
+!backend.hcl.example
+
+# NOTE: .terraform.lock.hcl is deliberately NOT ignored. Committing it pins
+# provider versions and hashes, so CI uses exactly what you tested with.
+# That is a supply-chain control.
+
+# --- Environment and secrets -----------------------------------------------
+.env
+.env.*
+!.env.example
+secrets.yaml
+secrets.yml
+*.secret
+
+# --- Kubernetes ------------------------------------------------------------
+kubeconfig
+*.kubeconfig
+.kube/
+# Rendered manifests can contain injected secret values.
+rendered.yaml
+rendered-*.yaml
+
+# --- Certificates and keys -------------------------------------------------
+*.pem
+*.key
+*.crt
+*.cer
+*.pfx
+*.p12
+*.jks
+*.keystore
+id_rsa*
+id_ed25519*
+
+# --- Python ----------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+env/
+.Python
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+coverage.xml
+htmlcov/
+junit.xml
+*.db
+*.sqlite3
+erp-local.db
+
+# --- Node ------------------------------------------------------------------
+node_modules/
+npm-debug.log*
+yarn-error.log*
+.npm/
+.pnpm-store/
+
+# --- Build and scan output -------------------------------------------------
+dist/
+build/
+*.tgz
+!k8s/helm/**/*.tgz
+*.sarif
+sbom*.json
+*.cdx.json
+zap-report.*
+.smoke-body.*.json
+bicep-build-output.json
+
+# --- Editors and OS --------------------------------------------------------
+.vscode/
+!.vscode/extensions.json
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# --- Local notes (keep your interview prep out of the repo) ----------------
+NOTES.local.md
+scratch/
+tmp/

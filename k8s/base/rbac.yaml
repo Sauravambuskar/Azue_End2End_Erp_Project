@@ -1,0 +1,94 @@
+# ===========================================================================
+# In-cluster RBAC bound to Entra ID groups.
+#
+# The subject "name" for an Entra group is its OBJECT ID, and apiGroup must be
+# rbac.authorization.k8s.io with kind: Group. Getting this wrong is the single
+# most common AKS + Entra integration mistake.
+#
+# Replace the placeholder GUIDs with:
+#   az ad group show -g "grp-erp-developers" --query id -o tsv
+# ===========================================================================
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: erp-developer
+  namespace: erp
+rules:
+  # Read almost everything...
+  - apiGroups: [""]
+    resources: [pods, services, configmaps, endpoints, events, persistentvolumeclaims]
+    verbs: [get, list, watch]
+  - apiGroups: [apps]
+    resources: [deployments, replicasets, statefulsets]
+    verbs: [get, list, watch]
+  - apiGroups: [batch]
+    resources: [jobs, cronjobs]
+    verbs: [get, list, watch]
+  - apiGroups: [autoscaling]
+    resources: [horizontalpodautoscalers]
+    verbs: [get, list, watch]
+  # ...plus the two things developers genuinely need in order to debug.
+  - apiGroups: [""]
+    resources: [pods/log]
+    verbs: [get, list]
+  - apiGroups: [""]
+    resources: [pods/portforward]
+    verbs: [create]
+  # Deliberately ABSENT: secrets (read), pods/exec, and any write verb.
+  # Reading secrets is how a developer account becomes a database breach.
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: erp-developers
+  namespace: erp
+subjects:
+  - kind: Group
+    name: "00000000-0000-0000-0000-000000000001" # grp-erp-developers object id
+    apiGroup: rbac.authorization.k8s.io
+roleRef:
+  kind: Role
+  name: erp-developer
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: erp-sre
+  namespace: erp
+rules:
+  - apiGroups: ["", apps, batch, autoscaling, networking.k8s.io, policy]
+    resources: ["*"]
+    verbs: [get, list, watch, create, update, patch, delete]
+  - apiGroups: [""]
+    resources: [pods/exec, pods/log, pods/portforward]
+    verbs: [create, get, list]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: erp-sre
+  namespace: erp
+subjects:
+  - kind: Group
+    name: "00000000-0000-0000-0000-000000000002" # grp-erp-sre object id
+    apiGroup: rbac.authorization.k8s.io
+roleRef:
+  kind: Role
+  name: erp-sre
+  apiGroup: rbac.authorization.k8s.io
+---
+# Read-only cluster view for the security team: no namespace blind spots,
+# but also no secret access.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: erp-security-view
+subjects:
+  - kind: Group
+    name: "00000000-0000-0000-0000-000000000003" # grp-erp-security object id
+    apiGroup: rbac.authorization.k8s.io
+roleRef:
+  kind: ClusterRole
+  name: view
+  apiGroup: rbac.authorization.k8s.io

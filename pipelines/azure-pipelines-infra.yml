@@ -1,0 +1,266 @@
+# ===========================================================================
+# ContosoERP - infrastructure pipeline (Terraform).
+#
+# Separate from the application pipeline on purpose:
+#   * different blast radius (a bad apply can delete a database)
+#   * different approvers (platform team, not the app team)
+#   * different cadence (infra changes weekly, apps change daily)
+#
+# The plan/apply split with an approval in between is the single most
+# important control here. Nobody applies Terraform without a human reading
+# the plan that will be applied - and `apply` consumes the SAVED plan file,
+# not a fresh one, so what was approved is exactly what runs.
+# ===========================================================================
+
+name: infra_$(SourceBranchName)_$(Date:yyyyMMdd)$(Rev:.r)
+
+trigger:
+  branches:
+    include:
+      - main
+  paths:
+    include:
+      - infra/*
+      - policy/*
+      - pipelines/azure-pipelines-infra.yml
+
+pr:
+  branches:
+    include:
+      - main
+  paths:
+    include:
+      - infra/*
+      - policy/*
+
+parameters:
+  - name: environment
+    displayName: Target environment
+    type: string
+    default: dev
+    values: [dev, test, prod]
+  - name: destroy
+    displayName: "DANGER: destroy instead of apply"
+    type: boolean
+    default: false
+
+variables:
+  - template: templates/variables-common.yml
+  - name: workingDirectory
+    value: infra/terraform/envs/${{ parameters.environment }}
+  - name: serviceConnection
+    value: sc-erp-${{ parameters.environment }}-wif
+  - name: tfstateResourceGroup
+    value: rg-tfstate-shared
+  - name: tfstateStorageAccount
+    value: sttfstateerpxxxxxx
+  - name: tfstateContainer
+    value: tfstate
+  - name: tfstateKey
+    value: erp/${{ parameters.environment }}/terraform.tfstate
+
+stages:
+  # ============================================================ 1. VALIDATE
+  - stage: validate
+    displayName: Validate and scan
+    jobs:
+      - job: fmt_validate
+        displayName: fmt, init, validate, scan
+        pool:
+          vmImage: ubuntu-latest
+        steps:
+          - checkout: self
+            fetchDepth: 1
+
+          - task: TerraformInstaller@1
+            displayName: Install Terraform $(terraformVersion)
+            inputs:
+              terraformVersion: $(terraformVersion)
+
+          - script: |
+              set -euo pipefail
+              # Formatting is a gate, not a suggestion. An unformatted diff
+              # makes every future plan review noisier than it needs to be.
+              terraform fmt -check -recursive infra/terraform
+            displayName: terraform fmt -check
+
+          - task: AzureCLI@2
+            displayName: terraform init and validate
+            inputs:
+              azureSubscription: $(serviceConnection)
+              scriptType: bash
+              scriptLocation: inlineScript
+              workingDirectory: $(workingDirectory)
+              addSpnToEnvironment: true
+              inlineScript: |
+                set -euo pipefail
+                # Federated credentials: no client secret anywhere.
+                export ARM_USE_AZUREAD=true
+                export ARM_USE_OIDC=true
+                export ARM_CLIENT_ID="$servicePrincipalId"
+                export ARM_OIDC_TOKEN="$idToken"
+                export ARM_TENANT_ID="$tenantId"
+                export ARM_SUBSCRIPTION_ID=$(az account show --query id -o tsv)
+
+                terraform init \
+                  -backend-config="resource_group_name=$(tfstateResourceGroup)" \
+                  -backend-config="storage_account_name=$(tfstateStorageAccount)" \
+                  -backend-config="container_name=$(tfstateContainer)" \
+                  -backend-config="key=$(tfstateKey)" \
+                  -input=false
+
+                terraform validate
+
+          - template: templates/steps-iac-scan.yml
+
+  # ================================================================ 2. PLAN
+  - stage: plan
+    displayName: Plan (${{ parameters.environment }})
+    dependsOn: validate
+    jobs:
+      - job: tf_plan
+        displayName: terraform plan
+        pool:
+          vmImage: ubuntu-latest
+        steps:
+          - checkout: self
+            fetchDepth: 1
+
+          - task: TerraformInstaller@1
+            inputs:
+              terraformVersion: $(terraformVersion)
+
+          - task: AzureCLI@2
+            displayName: terraform plan
+            inputs:
+              azureSubscription: $(serviceConnection)
+              scriptType: bash
+              scriptLocation: inlineScript
+              workingDirectory: $(workingDirectory)
+              addSpnToEnvironment: true
+              inlineScript: |
+                set -euo pipefail
+                export ARM_USE_AZUREAD=true
+                export ARM_USE_OIDC=true
+                export ARM_CLIENT_ID="$servicePrincipalId"
+                export ARM_OIDC_TOKEN="$idToken"
+                export ARM_TENANT_ID="$tenantId"
+                export ARM_SUBSCRIPTION_ID=$(az account show --query id -o tsv)
+
+                terraform init \
+                  -backend-config="resource_group_name=$(tfstateResourceGroup)" \
+                  -backend-config="storage_account_name=$(tfstateStorageAccount)" \
+                  -backend-config="container_name=$(tfstateContainer)" \
+                  -backend-config="key=$(tfstateKey)" \
+                  -input=false
+
+                terraform plan \
+                  ${DESTROY_FLAG} \
+                  -input=false \
+                  -lock-timeout=5m \
+                  -out=tfplan \
+                  -detailed-exitcode || PLAN_EXIT=$?
+
+                PLAN_EXIT=${PLAN_EXIT:-0}
+                echo "plan exit code: $PLAN_EXIT  (0=no changes, 2=changes)"
+
+                # Human-readable plan for the approver to read in the log.
+                terraform show -no-color tfplan > tfplan.txt
+                terraform show -json  tfplan > tfplan.json
+
+                echo "##vso[task.setvariable variable=planExitCode;isOutput=true]$PLAN_EXIT"
+
+                echo "=============== PLAN SUMMARY ==============="
+                grep -E '^(  # |Plan:|No changes)' tfplan.txt || true
+                echo "============================================"
+            name: planStep
+            env:
+              TF_VAR_postgres_admin_password: $(POSTGRES_ADMIN_PASSWORD)
+              TF_VAR_owner_email: $(OWNER_EMAIL)
+              # Template expressions are not usable inside a script body, only
+              # in a YAML value like this one. Expanded at compile time.
+              DESTROY_FLAG: ${{ iif(parameters.destroy, '-destroy', '') }}
+
+          # The plan file is the artifact. Apply must consume THIS file so the
+          # approved change is the applied change.
+          - publish: $(workingDirectory)/tfplan
+            artifact: tfplan-${{ parameters.environment }}
+            displayName: Publish plan binary
+
+          - publish: $(workingDirectory)/tfplan.txt
+            artifact: tfplan-readable-${{ parameters.environment }}
+            displayName: Publish readable plan
+
+  # =============================================================== 3. APPLY
+  - stage: apply
+    displayName: Apply (${{ parameters.environment }})
+    dependsOn: plan
+    condition: and(succeeded(), ne(variables['Build.Reason'], 'PullRequest'))
+    jobs:
+      - deployment: tf_apply
+        displayName: terraform apply
+        # Approval gates are configured on this Environment in the Azure
+        # DevOps UI: Environments > erp-infra-<env> > Approvals and checks.
+        environment: erp-infra-${{ parameters.environment }}
+        pool:
+          vmImage: ubuntu-latest
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - checkout: self
+                  fetchDepth: 1
+
+                - task: TerraformInstaller@1
+                  inputs:
+                    terraformVersion: $(terraformVersion)
+
+                - download: current
+                  artifact: tfplan-${{ parameters.environment }}
+                  displayName: Download the approved plan
+
+                - task: AzureCLI@2
+                  displayName: terraform apply (approved plan only)
+                  inputs:
+                    azureSubscription: $(serviceConnection)
+                    scriptType: bash
+                    scriptLocation: inlineScript
+                    workingDirectory: $(workingDirectory)
+                    addSpnToEnvironment: true
+                    inlineScript: |
+                      set -euo pipefail
+                      export ARM_USE_AZUREAD=true
+                      export ARM_USE_OIDC=true
+                      export ARM_CLIENT_ID="$servicePrincipalId"
+                      export ARM_OIDC_TOKEN="$idToken"
+                      export ARM_TENANT_ID="$tenantId"
+                      export ARM_SUBSCRIPTION_ID=$(az account show --query id -o tsv)
+
+                      terraform init \
+                        -backend-config="resource_group_name=$(tfstateResourceGroup)" \
+                        -backend-config="storage_account_name=$(tfstateStorageAccount)" \
+                        -backend-config="container_name=$(tfstateContainer)" \
+                        -backend-config="key=$(tfstateKey)" \
+                        -input=false
+
+                      cp "$(Pipeline.Workspace)/tfplan-${{ parameters.environment }}/tfplan" ./tfplan
+
+                      terraform apply -input=false -lock-timeout=5m -auto-approve tfplan
+
+                      echo "=== Outputs ==="
+                      terraform output -no-color
+
+                - task: AzureCLI@2
+                  displayName: Post-apply compliance check
+                  inputs:
+                    azureSubscription: $(serviceConnection)
+                    scriptType: bash
+                    scriptLocation: inlineScript
+                    inlineScript: |
+                      set -euo pipefail
+                      echo "Triggering an on-demand policy compliance scan."
+                      SUB=$(az account show --query id -o tsv)
+                      az policy state trigger-scan --subscription "$SUB" --no-wait
+                      echo "Scan queued. Results appear in Defender for Cloud"
+                      echo "and in: az policy state summarize"
+                  continueOnError: true

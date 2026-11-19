@@ -1,0 +1,121 @@
+# ===========================================================================
+# Reusable job: build, scan and push one container image.
+#
+# Order matters and is deliberate:
+#   1. build        (local tag only, nothing pushed yet)
+#   2. Trivy scan   (fail on CRITICAL)
+#   3. SBOM         (CycloneDX, published as a build artifact)
+#   4. push         (only a scanned image ever reaches the registry)
+#
+# A pipeline that pushes first and scans after has already shipped the
+# vulnerable image. That sequencing question comes up a lot in interviews.
+# ===========================================================================
+parameters:
+  - name: name
+    type: string
+  - name: displayName
+    type: string
+  - name: repository
+    type: string
+  - name: dockerfile
+    type: string
+  - name: buildContext
+    type: string
+  - name: imageTag
+    type: string
+  - name: failOnSeverity
+    type: string
+    default: CRITICAL
+
+jobs:
+  - job: ${{ parameters.name }}
+    displayName: ${{ parameters.displayName }}
+    pool:
+      vmImage: ubuntu-latest
+    steps:
+      - checkout: self
+        fetchDepth: 1
+
+      - script: |
+          set -euo pipefail
+          VER="$(trivyVersion)"
+          curl -sSfL "https://github.com/aquasecurity/trivy/releases/download/v${VER}/trivy_${VER}_Linux-64bit.tar.gz" \
+            | sudo tar -xz -C /usr/local/bin trivy
+        displayName: Install Trivy (pinned)
+
+      # ---------------------------------------------------------- 1. build
+      - task: Docker@2
+        displayName: Build image (not pushed yet)
+        inputs:
+          command: build
+          repository: ${{ parameters.repository }}
+          dockerfile: ${{ parameters.dockerfile }}
+          buildContext: ${{ parameters.buildContext }}
+          tags: |
+            ${{ parameters.imageTag }}
+          arguments: >-
+            --build-arg BUILD_VERSION=${{ parameters.imageTag }}
+            --build-arg GIT_SHA=$(Build.SourceVersion)
+            --label org.opencontainers.image.created=$(Build.QueuedBy)
+            --label build.pipeline=$(Build.DefinitionName)
+            --label build.id=$(Build.BuildId)
+
+      # ----------------------------------------------------------- 2. scan
+      - script: |
+          set -euo pipefail
+          IMAGE="${{ parameters.repository }}:${{ parameters.imageTag }}"
+          mkdir -p $(Build.ArtifactStagingDirectory)/container-scan
+
+          echo "=== Full report (all severities) ==="
+          trivy image "$IMAGE" \
+            --scanners vuln,secret,misconfig \
+            --format table \
+            --exit-code 0
+
+          trivy image "$IMAGE" \
+            --scanners vuln,secret \
+            --format sarif \
+            --output "$(Build.ArtifactStagingDirectory)/container-scan/${{ parameters.repository }}.sarif" \
+            --exit-code 0
+        displayName: Trivy image scan (report)
+
+      - script: |
+          set -euo pipefail
+          IMAGE="${{ parameters.repository }}:${{ parameters.imageTag }}"
+          echo "Gate: failing on ${{ parameters.failOnSeverity }} with a fix available."
+          # --ignore-unfixed is the pragmatic choice: a CVE with no upstream
+          # patch cannot be remediated by this build, so blocking on it just
+          # teaches the team to bypass the gate. It is still reported above.
+          trivy image "$IMAGE" \
+            --scanners vuln \
+            --severity ${{ parameters.failOnSeverity }} \
+            --ignore-unfixed \
+            --exit-code 1
+        displayName: Trivy gate
+
+      # ----------------------------------------------------------- 3. SBOM
+      - script: |
+          set -euo pipefail
+          IMAGE="${{ parameters.repository }}:${{ parameters.imageTag }}"
+          trivy image "$IMAGE" \
+            --format cyclonedx \
+            --output "$(Build.ArtifactStagingDirectory)/container-scan/${{ parameters.repository }}.cdx.json"
+          echo "SBOM generated. In a regulated environment this is retained"
+          echo "for the life of the deployed artifact so that a future CVE"
+          echo "disclosure can be matched against what is actually running."
+        displayName: Generate SBOM
+
+      # ----------------------------------------------------------- 4. push
+      - task: Docker@2
+        displayName: Push to ACR
+        inputs:
+          command: push
+          containerRegistry: $(acrServiceConnection)
+          repository: ${{ parameters.repository }}
+          tags: |
+            ${{ parameters.imageTag }}
+
+      - publish: $(Build.ArtifactStagingDirectory)/container-scan
+        artifact: container-scan-${{ parameters.repository }}
+        displayName: Publish scan report and SBOM
+        condition: succeededOrFailed()

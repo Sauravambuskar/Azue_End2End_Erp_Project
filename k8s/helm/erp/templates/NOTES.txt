@@ -1,0 +1,35 @@
+ContosoERP {{ .Chart.AppVersion }} deployed to namespace {{ .Values.namespace }}
+Release: {{ .Release.Name }}   Revision: {{ .Release.Revision }}   Env: {{ .Values.config.env }}
+
+Check it came up:
+
+  kubectl -n {{ .Values.namespace }} get pods,svc,hpa
+  kubectl -n {{ .Values.namespace }} rollout status deploy/{{ include "erp.name" . }}-api
+
+Reach the UI without an ingress (port-forward):
+
+  kubectl -n {{ .Values.namespace }} port-forward svc/{{ include "erp.name" . }}-web {{ .Values.web.port }}:{{ .Values.web.port }}
+  open http://localhost:{{ .Values.web.port }}
+
+{{- if .Values.ingress.enabled }}
+
+Ingress is enabled ({{ .Values.ingress.className }}). Public address:
+
+  kubectl -n {{ .Values.namespace }} get ingress {{ include "erp.name" . }} -o jsonpath='{.status.loadBalancer.ingress[0].ip}'
+{{- end }}
+
+Verify workload identity actually works (should print a JWT, not an error):
+
+  kubectl -n {{ .Values.namespace }} exec deploy/{{ include "erp.name" . }}-api -- \
+    cat /var/run/secrets/azure/tokens/azure-identity-token | head -c 40
+
+Run the worker on demand instead of waiting for the schedule:
+
+  kubectl -n {{ .Values.namespace }} create job --from=cronjob/{{ include "erp.name" . }}-worker worker-manual-1
+  kubectl -n {{ .Values.namespace }} logs job/worker-manual-1
+
+{{- if not .Values.azure.workloadIdentity.api.clientId }}
+
+WARNING: azure.workloadIdentity.api.clientId is empty. Pods will fail to get
+Entra tokens. Fill it from:  terraform output -json workload_identity_client_ids
+{{- end }}

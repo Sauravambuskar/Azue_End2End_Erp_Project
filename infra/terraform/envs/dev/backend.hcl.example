@@ -1,0 +1,5 @@
+# Copy to backend.hcl and fill in. backend.hcl is gitignored.
+resource_group_name  = "rg-tfstate-shared"
+storage_account_name = "sttfstateerpXXXXXX"
+container_name       = "tfstate"
+key                  = "erp/dev/terraform.tfstate"

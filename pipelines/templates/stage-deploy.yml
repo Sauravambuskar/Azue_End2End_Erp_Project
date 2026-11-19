@@ -1,0 +1,264 @@
+# ===========================================================================
+# Reusable deployment stage.
+#
+# Uses a deployment job against an Azure DevOps *Environment*, which is what
+# gives you:
+#   * manual approval gates and business-hours checks
+#   * deployment history per environment
+#   * the ability to see which build is live where
+#
+# That is the JD's "release approvals and environment promotion" requirement.
+# Approvals are configured ON THE ENVIRONMENT in the Azure DevOps UI, not in
+# YAML - a common gotcha, since YAML-defined approvals do not exist.
+# ===========================================================================
+parameters:
+  - name: stageName
+    type: string
+  - name: displayName
+    type: string
+  - name: environmentName
+    type: string
+  - name: dependsOn
+    type: string
+  - name: condition
+    type: string
+    default: succeeded()
+  - name: azureSubscription
+    type: string
+  - name: aksResourceGroup
+    type: string
+  - name: aksCluster
+    type: string
+  - name: valuesFile
+    type: string
+  - name: imageTag
+    type: string
+  - name: runSmokeTests
+    type: boolean
+    default: true
+  - name: runDast
+    type: boolean
+    default: false
+  - name: requireChangeTicket
+    type: boolean
+    default: false
+
+stages:
+  - stage: ${{ parameters.stageName }}
+    displayName: ${{ parameters.displayName }}
+    dependsOn: ${{ parameters.dependsOn }}
+    condition: ${{ parameters.condition }}
+    jobs:
+      # ------------------------------------------------- pre-flight checks
+      - ${{ if parameters.requireChangeTicket }}:
+          - job: change_control
+            displayName: Verify change ticket
+            pool:
+              vmImage: ubuntu-latest
+            steps:
+              - checkout: none
+              - script: |
+                  set -euo pipefail
+                  # In a real org this calls ServiceNow/Jira. Here it enforces
+                  # that the person running a prod deploy supplied a ticket id
+                  # in the CHANGE_TICKET pipeline variable.
+                  TICKET="${CHANGE_TICKET:-}"
+                  if [ -z "$TICKET" ]; then
+                    echo "##vso[task.logissue type=error]No CHANGE_TICKET supplied for a production deployment"
+                    exit 1
+                  fi
+                  if ! echo "$TICKET" | grep -Eq '^(CHG|RFC)-[0-9]{4,}$'; then
+                    echo "##vso[task.logissue type=error]CHANGE_TICKET '$TICKET' is not of the form CHG-1234"
+                    exit 1
+                  fi
+                  echo "Deploying under change $TICKET"
+                env:
+                  CHANGE_TICKET: $(CHANGE_TICKET)
+
+      # ------------------------------------------------------- the deployment
+      - deployment: deploy
+        displayName: Helm deploy
+        environment: ${{ parameters.environmentName }}
+        ${{ if parameters.requireChangeTicket }}:
+          dependsOn: change_control
+        pool:
+          vmImage: ubuntu-latest
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - checkout: self
+                  fetchDepth: 1
+
+                - task: HelmInstaller@1
+                  displayName: Install Helm $(helmVersion)
+                  inputs:
+                    helmVersionToInstall: $(helmVersion)
+
+                - task: AzureCLI@2
+                  displayName: Get AKS credentials
+                  inputs:
+                    azureSubscription: ${{ parameters.azureSubscription }}
+                    scriptType: bash
+                    scriptLocation: inlineScript
+                    inlineScript: |
+                      set -euo pipefail
+                      az aks get-credentials \
+                        --resource-group "${{ parameters.aksResourceGroup }}" \
+                        --name "${{ parameters.aksCluster }}" \
+                        --overwrite-existing
+
+                      # kubelogin converts the kubeconfig to a non-interactive
+                      # Entra ID flow using the service connection's identity.
+                      # Without this step, Entra-enabled clusters prompt for a
+                      # device code and the pipeline hangs then times out.
+                      az aks install-cli --only-show-errors || true
+                      kubelogin convert-kubeconfig -l azurecli
+
+                      kubectl cluster-info
+                      kubectl get nodes -o wide
+
+                - task: AzureCLI@2
+                  displayName: Resolve workload identity client ids
+                  inputs:
+                    azureSubscription: ${{ parameters.azureSubscription }}
+                    scriptType: bash
+                    scriptLocation: inlineScript
+                    inlineScript: |
+                      set -euo pipefail
+                      ENV_SHORT=$(basename "${{ parameters.valuesFile }}" .yaml | sed 's/values-//')
+                      RG="${{ parameters.aksResourceGroup }}"
+                      PLATFORM_RG="${RG%-aks}-platform"
+
+                      get_client_id() {
+                        az identity show -g "$PLATFORM_RG" -n "$1" --query clientId -o tsv 2>/dev/null || echo ""
+                      }
+
+                      API_CID=$(get_client_id "id-erp-api-${ENV_SHORT}")
+                      WEB_CID=$(get_client_id "id-erp-web-${ENV_SHORT}")
+                      WRK_CID=$(get_client_id "id-erp-worker-${ENV_SHORT}")
+                      MIG_CID=$(get_client_id "id-erp-migrate-${ENV_SHORT}")
+                      TENANT=$(az account show --query tenantId -o tsv)
+
+                      # Not secret (a client id is public), but set as output
+                      # variables so the Helm step can consume them.
+                      echo "##vso[task.setvariable variable=apiClientId]$API_CID"
+                      echo "##vso[task.setvariable variable=webClientId]$WEB_CID"
+                      echo "##vso[task.setvariable variable=workerClientId]$WRK_CID"
+                      echo "##vso[task.setvariable variable=migrateClientId]$MIG_CID"
+                      echo "##vso[task.setvariable variable=tenantId]$TENANT"
+
+                      for v in "$API_CID" "$WEB_CID" "$WRK_CID" "$MIG_CID"; do
+                        if [ -z "$v" ]; then
+                          echo "##vso[task.logissue type=error]A workload identity client id could not be resolved. Has terraform apply run for this environment?"
+                          exit 1
+                        fi
+                      done
+
+                - script: |
+                    set -euo pipefail
+                    kubectl apply -f k8s/base/namespace.yaml
+                  displayName: Ensure namespace and quotas
+
+                - script: |
+                    set -euo pipefail
+                    # --atomic: on any failure, Helm rolls the release back to
+                    #   the previous revision automatically.
+                    # --wait + --timeout: the step fails if pods never become
+                    #   ready, instead of reporting a false success.
+                    helm upgrade --install $(helmRelease) $(helmChartPath) \
+                      --namespace $(k8sNamespace) \
+                      --create-namespace \
+                      -f ${{ parameters.valuesFile }} \
+                      --set image.registry=$(acrLoginServer) \
+                      --set image.tag=${{ parameters.imageTag }} \
+                      --set azure.tenantId=$(tenantId) \
+                      --set azure.workloadIdentity.api.clientId=$(apiClientId) \
+                      --set azure.workloadIdentity.web.clientId=$(webClientId) \
+                      --set azure.workloadIdentity.worker.clientId=$(workerClientId) \
+                      --set azure.workloadIdentity.migrate.clientId=$(migrateClientId) \
+                      --atomic \
+                      --wait \
+                      --timeout 10m
+
+                    helm status $(helmRelease) -n $(k8sNamespace)
+                  displayName: Helm upgrade (atomic, waits for readiness)
+
+                - script: |
+                    set -euo pipefail
+                    kubectl -n $(k8sNamespace) rollout status deploy/erp-api  --timeout=5m
+                    kubectl -n $(k8sNamespace) rollout status deploy/erp-web  --timeout=5m
+                    kubectl -n $(k8sNamespace) get pods -o wide
+                  displayName: Verify rollout
+
+                # --------------------------------------------- smoke tests
+                - ${{ if parameters.runSmokeTests }}:
+                    - script: |
+                        set -euo pipefail
+                        chmod +x scripts/smoke-test.sh
+                        kubectl -n $(k8sNamespace) port-forward svc/erp-api 18000:8000 &
+                        PF_PID=$!
+                        trap 'kill $PF_PID 2>/dev/null || true' EXIT
+                        for i in $(seq 1 30); do
+                          curl -sf http://127.0.0.1:18000/healthz/live >/dev/null && break
+                          sleep 2
+                        done
+                        ./scripts/smoke-test.sh http://127.0.0.1:18000
+                      displayName: Smoke tests against the deployed API
+
+                # ---------------------------------------------------- DAST
+                - ${{ if parameters.runDast }}:
+                    - script: |
+                        set -euo pipefail
+                        kubectl -n $(k8sNamespace) port-forward svc/erp-web 18080:3000 &
+                        PF_PID=$!
+                        trap 'kill $PF_PID 2>/dev/null || true' EXIT
+                        sleep 10
+
+                        mkdir -p $(Build.ArtifactStagingDirectory)/dast
+                        # ZAP baseline: passive scan plus a short active pass.
+                        # -I means "do not fail on warnings" - DAST findings are
+                        # triaged, not auto-blocking, because false positives
+                        # against an authenticated API are common.
+                        docker run --rm --network host \
+                          -v "$(pwd)/security/dast:/zap/wrk/:rw" \
+                          ghcr.io/zaproxy/zaproxy:stable \
+                          zap-baseline.py \
+                            -t http://127.0.0.1:18080 \
+                            -c zap-rules.tsv \
+                            -r zap-report.html \
+                            -J zap-report.json \
+                            -I || true
+                        cp security/dast/zap-report.* $(Build.ArtifactStagingDirectory)/dast/ 2>/dev/null || true
+                      displayName: DAST (OWASP ZAP baseline)
+                      continueOnError: true
+
+                    - publish: $(Build.ArtifactStagingDirectory)/dast
+                      artifact: dast-report-${{ parameters.stageName }}
+                      displayName: Publish DAST report
+                      condition: succeededOrFailed()
+                      continueOnError: true
+
+            # ----------------------------------------------- failure routine
+            on:
+              failure:
+                steps:
+                  - script: |
+                      set -euo pipefail
+                      echo "=== Deployment failed. Collecting diagnostics. ==="
+                      kubectl -n $(k8sNamespace) get events \
+                        --sort-by=.lastTimestamp | tail -40 || true
+                      kubectl -n $(k8sNamespace) describe pods | tail -120 || true
+                      kubectl -n $(k8sNamespace) logs -l app.kubernetes.io/part-of=contoso-erp \
+                        --tail=100 --all-containers --prefix || true
+                      echo "Helm --atomic has already rolled the release back."
+                      helm history $(helmRelease) -n $(k8sNamespace) || true
+                    displayName: Collect failure diagnostics
+                    continueOnError: true
+              success:
+                steps:
+                  - script: |
+                      echo "${{ parameters.displayName }} succeeded: image tag ${{ parameters.imageTag }}"
+                      helm history $(helmRelease) -n $(k8sNamespace) || true
+                    displayName: Record deployment
+                    continueOnError: true

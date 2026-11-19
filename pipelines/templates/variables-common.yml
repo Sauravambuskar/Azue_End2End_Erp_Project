@@ -1,0 +1,68 @@
+# ===========================================================================
+# Shared variables for every ERP pipeline.
+#
+# NOTE what is NOT here: no passwords, no connection strings, no keys.
+# Secrets live in a variable GROUP linked to Key Vault, so the pipeline reads
+# them at run time with its own identity and Azure DevOps masks them in logs.
+#
+#   az pipelines variable-group create \
+#     --name erp-secrets-dev --authorize true \
+#     --variables placeholder=unused
+#   # then in the UI: link secrets from Key Vault kv-erp-dev-xxxxxx
+# ===========================================================================
+variables:
+  # --- Azure DevOps service connections (workload identity federation, not
+  #     a client secret: see guidance/08-azure-devops-setup.md) ---
+  - name: serviceConnectionDev
+    value: sc-erp-dev-wif
+  - name: serviceConnectionTest
+    value: sc-erp-test-wif
+  - name: serviceConnectionProd
+    value: sc-erp-prod-wif
+
+  # --- container registry ---
+  - name: acrName
+    value: acrerpdevxxxxxx
+  - name: acrLoginServer
+    value: acrerpdevxxxxxx.azurecr.io
+  - name: acrServiceConnection
+    value: sc-erp-acr
+
+  # --- AKS targets ---
+  - name: aksClusterDev
+    value: aks-erp-dev-cin-01
+  - name: aksResourceGroupDev
+    value: rg-erp-dev-cin-aks
+  - name: aksClusterTest
+    value: aks-erp-test-cin-01
+  - name: aksResourceGroupTest
+    value: rg-erp-test-cin-aks
+  - name: aksClusterProd
+    value: aks-erp-prod-cin-01
+  - name: aksResourceGroupProd
+    value: rg-erp-prod-cin-aks
+
+  # --- kubernetes ---
+  - name: k8sNamespace
+    value: erp
+  - name: helmChartPath
+    value: k8s/helm/erp
+  - name: helmRelease
+    value: erp
+
+  # --- tool versions, pinned. "latest" in a pipeline is a supply-chain risk
+  #     and makes failures unreproducible. ---
+  - name: pythonVersion
+    value: "3.12"
+  - name: nodeVersion
+    value: "20.x"
+  - name: terraformVersion
+    value: "1.10.3"
+  - name: helmVersion
+    value: "3.16.3"
+  - name: trivyVersion
+    value: "0.58.1"
+  - name: gitleaksVersion
+    value: "8.21.2"
+  - name: checkovVersion
+    value: "3.2.334"

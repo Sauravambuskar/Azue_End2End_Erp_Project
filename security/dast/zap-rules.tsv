@@ -1,0 +1,21 @@
+# OWASP ZAP rule configuration.
+# Format: <rule-id>	<WARN|IGNORE|FAIL>	<comment>
+#
+# Tuned for an API behind Application Gateway. Each IGNORE has a reason; an
+# unexplained IGNORE should fail code review.
+10015	IGNORE	Incomplete cache-control - the API is no-store by default via headers middleware
+10027	IGNORE	Information disclosure in suspicious comments - matches on ERP domain words
+10035	WARN	HSTS - set by App Gateway rewrite rule, absent when testing via port-forward
+10063	WARN	Permissions-Policy - set by the API middleware
+10096	IGNORE	Timestamp disclosure - ERP responses legitimately contain order dates
+10098	WARN	Cross-domain misconfiguration
+10109	WARN	Modern web application detection - informational only
+10202	WARN	Absence of anti-CSRF tokens - the BFF is token-based, not cookie-based
+2	FAIL	Private IP disclosure - would leak the pod CIDR to the internet
+10021	FAIL	X-Content-Type-Options missing
+10020	FAIL	X-Frame-Options / anti-clickjacking missing
+40012	FAIL	Reflected XSS
+40014	FAIL	Persistent XSS
+40018	FAIL	SQL injection
+90019	FAIL	Server-side code injection
+90020	FAIL	Remote OS command injection

@@ -1,0 +1,15 @@
+fastapi==0.115.5
+uvicorn[standard]==0.32.1
+sqlalchemy==2.0.36
+psycopg[binary]==3.2.3
+pydantic==2.10.3
+pydantic-settings==2.6.1
+azure-identity==1.19.0
+azure-keyvault-secrets==4.9.0
+azure-monitor-opentelemetry==1.6.4
+opentelemetry-instrumentation-fastapi==0.49b2
+prometheus-fastapi-instrumentator==7.0.0
+python-jose[cryptography]==3.3.0
+httpx==0.28.1
+azure-servicebus==7.12.3
+structlog==24.4.0

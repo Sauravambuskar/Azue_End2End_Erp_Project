@@ -1,0 +1,69 @@
+{{- if .Values.migrate.enabled }}
+# ===========================================================================
+# Database migration as a Helm pre-upgrade hook.
+#
+# Why a hook and not a pipeline step: the Flexible Server has no public
+# endpoint, so migrations must run from inside the VNet. A Job on the cluster
+# is the simplest thing that is also correct.
+#
+# Why a SEPARATE service account: this is the only identity holding the
+# erp_migrator database role (DDL rights). The API and worker pods can never
+# alter the schema, even if compromised.
+# ===========================================================================
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "erp.name" . }}-migrate-{{ .Release.Revision }}
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "erp.labels" . | nindent 4 }}
+    app.kubernetes.io/component: migrate
+  annotations:
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "-5"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: {{ .Values.migrate.backoffLimit }}
+  activeDeadlineSeconds: 600
+  ttlSecondsAfterFinished: 3600
+  template:
+    metadata:
+      labels:
+        {{- include "erp.labels" . | nindent 8 }}
+        app.kubernetes.io/component: migrate
+        azure.workload.identity/use: "true"
+    spec:
+      serviceAccountName: erp-migrate-sa
+      automountServiceAccountToken: false
+      restartPolicy: Never
+      securityContext:
+        {{- include "erp.podSecurityContext" . | nindent 8 }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: migrate
+          image: {{ include "erp.image" (dict "registry" .Values.image.registry "repository" "erp-migrate" "tag" (.Values.migrate.image.tag | default .Values.image.tag)) }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- include "erp.containerSecurityContext" . | nindent 12 }}
+          env:
+            - name: ERP_DB_USER
+              value: {{ printf "id-erp-migrate-%s" .Values.config.env | quote }}
+            {{- include "erp.dbEnv" . | nindent 12 }}
+          resources:
+            requests:
+              cpu: 50m
+              memory: 96Mi
+            limits:
+              memory: 256Mi
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir:
+            medium: Memory
+            sizeLimit: 32Mi
+{{- end }}

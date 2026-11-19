@@ -1,0 +1,10 @@
+apiVersion: v2
+name: erp
+description: ContosoERP platform - API, web BFF and background worker on AKS
+type: application
+version: 1.0.0
+appVersion: "1.0.0"
+keywords: [erp, aks, devsecops]
+maintainers:
+  - name: Platform Engineering
+    email: platform-engineering@contoso.com

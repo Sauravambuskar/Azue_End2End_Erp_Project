@@ -1,0 +1,71 @@
+{
+  "properties": {
+    "displayName": "ERP - Deny public IP addresses on network interfaces",
+    "policyType": "Custom",
+    "mode": "All",
+    "description": "Virtual machines and node NICs in the ERP landing zone must not have a public IP. All inbound traffic enters through Application Gateway; all outbound leaves through Azure Firewall or the cluster load balancer. A public IP on a NIC bypasses both and is therefore denied, not merely audited.",
+    "metadata": {
+      "version": "1.0.0",
+      "category": "Network",
+      "owner": "platform-engineering@contoso.com"
+    },
+    "parameters": {
+      "effect": {
+        "type": "String",
+        "metadata": {
+          "displayName": "Effect",
+          "description": "Deny blocks the deployment. Audit records a non-compliance entry only."
+        },
+        "allowedValues": ["Audit", "Deny", "Disabled"],
+        "defaultValue": "Deny"
+      },
+      "exemptedSubnets": {
+        "type": "Array",
+        "metadata": {
+          "displayName": "Exempted subnet names",
+          "description": "Subnets whose resources are allowed a public IP, e.g. AzureFirewallSubnet and AzureBastionSubnet."
+        },
+        "defaultValue": [
+          "AzureFirewallSubnet",
+          "AzureBastionSubnet",
+          "snet-appgw"
+        ]
+      }
+    },
+    "policyRule": {
+      "if": {
+        "allOf": [
+          {
+            "field": "type",
+            "equals": "Microsoft.Network/networkInterfaces"
+          },
+          {
+            "count": {
+              "field": "Microsoft.Network/networkInterfaces/ipConfigurations[*]",
+              "where": {
+                "field": "Microsoft.Network/networkInterfaces/ipConfigurations[*].publicIpAddress.id",
+                "exists": "true"
+              }
+            },
+            "greater": 0
+          },
+          {
+            "not": {
+              "count": {
+                "field": "Microsoft.Network/networkInterfaces/ipConfigurations[*]",
+                "where": {
+                  "value": "[last(split(first(field('Microsoft.Network/networkInterfaces/ipConfigurations[*].subnet.id')), '/'))]",
+                  "in": "[parameters('exemptedSubnets')]"
+                }
+              },
+              "greater": 0
+            }
+          }
+        ]
+      },
+      "then": {
+        "effect": "[parameters('effect')]"
+      }
+    }
+  }
+}

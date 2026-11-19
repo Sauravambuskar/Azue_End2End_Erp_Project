@@ -1,0 +1,63 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ include "erp.name" . }}-worker
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "erp.labels" . | nindent 4 }}
+    app.kubernetes.io/component: worker
+spec:
+  schedule: {{ .Values.worker.schedule | quote }}
+  timeZone: "Asia/Kolkata"
+  concurrencyPolicy: Forbid       # never run two reorder scans at once
+  startingDeadlineSeconds: 300
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: {{ .Values.worker.backoffLimit }}
+      activeDeadlineSeconds: {{ .Values.worker.activeDeadlineSeconds }}
+      ttlSecondsAfterFinished: 3600
+      template:
+        metadata:
+          labels:
+            {{- include "erp.labels" . | nindent 12 }}
+            app.kubernetes.io/component: worker
+            azure.workload.identity/use: "true"
+        spec:
+          serviceAccountName: erp-worker-sa
+          automountServiceAccountToken: false
+          restartPolicy: Never
+          securityContext:
+            {{- include "erp.podSecurityContext" . | nindent 12 }}
+          {{- with .Values.nodeSelector }}
+          nodeSelector:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          containers:
+            - name: worker
+              image: {{ include "erp.image" (dict "registry" .Values.image.registry "repository" "erp-worker" "tag" .Values.image.tag) }}
+              imagePullPolicy: {{ .Values.image.pullPolicy }}
+              securityContext:
+                {{- include "erp.containerSecurityContext" . | nindent 16 }}
+              env:
+                - name: ERP_WORKER_JOB
+                  value: {{ .Values.worker.job | quote }}
+                - name: ERP_LOG_LEVEL
+                  valueFrom:
+                    configMapKeyRef:
+                      name: {{ include "erp.name" . }}-config
+                      key: log_level
+                - name: ERP_DB_USER
+                  value: {{ printf "id-erp-worker-%s" .Values.config.env | quote }}
+                {{- include "erp.dbEnv" . | nindent 16 }}
+              resources:
+                {{- toYaml .Values.worker.resources | nindent 16 }}
+              volumeMounts:
+                - name: tmp
+                  mountPath: /tmp
+          volumes:
+            - name: tmp
+              emptyDir:
+                medium: Memory
+                sizeLimit: 32Mi

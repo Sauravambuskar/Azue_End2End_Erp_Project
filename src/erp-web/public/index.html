@@ -1,0 +1,109 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>ContosoERP</title>
+<link rel="stylesheet" href="/app.css" />
+</head>
+<body>
+<header>
+  <div class="brand">Contoso<span>ERP</span></div>
+  <div class="env" id="env-badge">loading…</div>
+</header>
+
+<nav>
+  <button class="tab active" data-view="dashboard">Dashboard</button>
+  <button class="tab" data-view="products">Products</button>
+  <button class="tab" data-view="sales">Sales Orders</button>
+  <button class="tab" data-view="purchasing">Purchasing</button>
+  <button class="tab" data-view="inventory">Inventory</button>
+  <button class="tab" data-view="finance">Finance</button>
+</nav>
+
+<main>
+  <section id="dashboard" class="view active">
+    <div class="cards">
+      <div class="card"><h3>Products</h3><p id="kpi-products">–</p></div>
+      <div class="card"><h3>Customers</h3><p id="kpi-customers">–</p></div>
+      <div class="card"><h3>Open sales orders</h3><p id="kpi-orders">–</p></div>
+      <div class="card"><h3>Below reorder point</h3><p id="kpi-reorder">–</p></div>
+    </div>
+    <h2>Platform health</h2>
+    <pre id="health-out">checking…</pre>
+  </section>
+
+  <section id="products" class="view">
+    <h2>Products</h2>
+    <form id="product-form" class="row">
+      <input name="sku" placeholder="SKU (e.g. BEARING-6204)" required />
+      <input name="name" placeholder="Name" required />
+      <input name="category" placeholder="Category" value="components" />
+      <input name="unit_price" type="number" step="0.01" placeholder="Unit price" required />
+      <input name="standard_cost" type="number" step="0.01" placeholder="Std cost" value="0" />
+      <input name="reorder_point" type="number" step="1" placeholder="Reorder pt" value="0" />
+      <button type="submit">Add product</button>
+    </form>
+    <table id="product-table"><thead><tr>
+      <th>SKU</th><th>Name</th><th>Category</th><th>Price</th><th>Std cost</th><th>Reorder</th>
+    </tr></thead><tbody></tbody></table>
+  </section>
+
+  <section id="sales" class="view">
+    <h2>Sales orders</h2>
+    <form id="so-form" class="row">
+      <select name="customer_id" required></select>
+      <select name="warehouse_id" required></select>
+      <select name="product_id" required></select>
+      <input name="quantity" type="number" step="1" value="1" required />
+      <input name="discount_pct" type="number" step="1" value="0" />
+      <button type="submit">Create order</button>
+    </form>
+    <table id="so-table"><thead><tr>
+      <th>Order</th><th>Customer</th><th>Date</th><th>Status</th><th>Total</th><th>Advance</th>
+    </tr></thead><tbody></tbody></table>
+  </section>
+
+  <section id="purchasing" class="view">
+    <h2>Purchase orders</h2>
+    <form id="po-form" class="row">
+      <select name="supplier_id" required></select>
+      <select name="warehouse_id" required></select>
+      <select name="product_id" required></select>
+      <input name="quantity" type="number" step="1" value="100" required />
+      <input name="unit_cost" type="number" step="0.01" value="180" required />
+      <button type="submit">Create PO</button>
+    </form>
+    <table id="po-table"><thead><tr>
+      <th>PO</th><th>Supplier</th><th>Date</th><th>Status</th><th>Total</th><th>Action</th>
+    </tr></thead><tbody></tbody></table>
+  </section>
+
+  <section id="inventory" class="view">
+    <h2>Stock on hand</h2>
+    <div class="row">
+      <select id="inv-warehouse"></select>
+      <button id="inv-refresh">Refresh</button>
+    </div>
+    <table id="stock-table"><thead><tr>
+      <th>SKU</th><th>On hand</th><th>Reorder point</th><th>Status</th>
+    </tr></thead><tbody></tbody></table>
+  </section>
+
+  <section id="finance" class="view">
+    <h2>Trial balance</h2>
+    <table id="tb-table"><thead><tr>
+      <th>Account</th><th>Debit</th><th>Credit</th><th>Balance</th>
+    </tr></thead><tbody></tbody></table>
+    <p id="tb-status"></p>
+  </section>
+</main>
+
+<footer>
+  <span>ContosoERP · Azure DevSecOps practice platform</span>
+  <span id="version">v–</span>
+</footer>
+
+<script src="/app.js"></script>
+</body>
+</html>

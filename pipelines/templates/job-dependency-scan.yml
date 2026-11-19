@@ -1,0 +1,99 @@
+# ===========================================================================
+# SCA - software composition analysis (third-party CVEs).
+#
+# Policy encoded here:
+#   CRITICAL -> fail the build.
+#   HIGH     -> warn, and the finding must be logged as an accepted risk with
+#               an expiry date. "Accepted forever" is how organisations end up
+#               with a four-year-old Log4j.
+# ===========================================================================
+parameters:
+  - name: name
+    type: string
+    default: dependency_scan
+  - name: failOnSeverity
+    type: string
+    default: CRITICAL
+
+jobs:
+  - job: ${{ parameters.name }}
+    displayName: Dependency scan (pip-audit + Trivy fs)
+    pool:
+      vmImage: ubuntu-latest
+    steps:
+      - checkout: self
+        fetchDepth: 1
+
+      - task: UsePythonVersion@0
+        inputs:
+          versionSpec: "3.12"
+
+      - script: pip install --quiet pip-audit==2.7.3
+        displayName: Install pip-audit
+
+      - script: |
+          set -euo pipefail
+          mkdir -p $(Build.ArtifactStagingDirectory)/sca
+          for svc in src/erp-api src/erp-worker; do
+            echo "=== $svc ==="
+            pip-audit -r "$svc/requirements.txt" \
+              --format json \
+              --output "$(Build.ArtifactStagingDirectory)/sca/pip-audit-$(basename $svc).json" \
+              || true
+            # Human readable
+            pip-audit -r "$svc/requirements.txt" --format columns || true
+          done
+        displayName: pip-audit (report)
+
+      - script: |
+          set -euo pipefail
+          # The gate. pip-audit exits non-zero when any vulnerability is found;
+          # the ignore list is the explicit, reviewable accepted-risk register.
+          IGNORES=""
+          if [ -f security/sca-accepted-risks.txt ]; then
+            while read -r line; do
+              case "$line" in ''|\#*) continue ;; esac
+              id=$(echo "$line" | awk '{print $1}')
+              expiry=$(echo "$line" | awk '{print $2}')
+              today=$(date -u +%Y-%m-%d)
+              if [ "$expiry" \< "$today" ]; then
+                echo "##vso[task.logissue type=error]Accepted risk $id expired on $expiry - re-assess or patch"
+                exit 1
+              fi
+              IGNORES="$IGNORES --ignore-vuln $id"
+            done < security/sca-accepted-risks.txt
+          fi
+          echo "Ignoring (within expiry): $IGNORES"
+          for svc in src/erp-api src/erp-worker; do
+            pip-audit -r "$svc/requirements.txt" $IGNORES
+          done
+        displayName: pip-audit gate (with expiring accepted-risk register)
+
+      - script: |
+          set -euo pipefail
+          VER="$(trivyVersion)"
+          curl -sSfL "https://github.com/aquasecurity/trivy/releases/download/v${VER}/trivy_${VER}_Linux-64bit.tar.gz" \
+            | sudo tar -xz -C /usr/local/bin trivy
+          trivy --version
+        displayName: Install Trivy (pinned)
+
+      - script: |
+          set -euo pipefail
+          # Filesystem scan picks up lock files for BOTH languages in one pass
+          # and also flags misconfigurations in the Dockerfiles.
+          trivy fs . \
+            --scanners vuln,misconfig,secret \
+            --severity HIGH,CRITICAL \
+            --format sarif \
+            --output $(Build.ArtifactStagingDirectory)/sca/trivy-fs.sarif \
+            --exit-code 0
+          trivy fs . \
+            --scanners vuln \
+            --severity ${{ parameters.failOnSeverity }} \
+            --exit-code 1
+        displayName: Trivy filesystem gate
+
+      - publish: $(Build.ArtifactStagingDirectory)/sca
+        artifact: sca-reports
+        displayName: Publish SCA reports
+        condition: succeededOrFailed()

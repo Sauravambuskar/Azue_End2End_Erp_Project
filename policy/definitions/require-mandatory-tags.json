@@ -1,0 +1,45 @@
+{
+  "properties": {
+    "displayName": "ERP - Require mandatory governance tags",
+    "policyType": "Custom",
+    "mode": "Indexed",
+    "description": "Every resource in the ERP landing zone must carry the tags that cost allocation, ownership and data-classification reporting depend on. This is the policy that makes the naming module's tag output enforceable rather than advisory.",
+    "metadata": {
+      "version": "1.0.0",
+      "category": "Tags",
+      "owner": "platform-engineering@contoso.com"
+    },
+    "parameters": {
+      "effect": {
+        "type": "String",
+        "allowedValues": ["Audit", "Deny", "Disabled"],
+        "defaultValue": "Deny",
+        "metadata": { "displayName": "Effect" }
+      },
+      "requiredTags": {
+        "type": "Array",
+        "defaultValue": ["Workload", "Environment", "CostCentre", "Owner", "DataClass", "ManagedBy"],
+        "metadata": {
+          "displayName": "Required tag names",
+          "description": "All of these must be present and non-empty."
+        }
+      }
+    },
+    "policyRule": {
+      "if": {
+        "count": {
+          "value": "[parameters('requiredTags')]",
+          "name": "tagName",
+          "where": {
+            "value": "[empty(field(concat('tags[', current('tagName'), ']')))]",
+            "equals": true
+          }
+        },
+        "greater": 0
+      },
+      "then": {
+        "effect": "[parameters('effect')]"
+      }
+    }
+  }
+}

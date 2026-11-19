@@ -1,0 +1,31 @@
+# Copy to terraform.tfvars and edit. terraform.tfvars is gitignored.
+
+location    = "centralindia"
+owner_email = "you@example.com"
+cost_centre = "CC-LEARNING-001"
+
+# curl -s https://api.ipify.org
+my_public_ip = "203.0.113.45"
+
+# az ad signed-in-user show --query id -o tsv
+db_aad_admin_object_id      = "00000000-0000-0000-0000-000000000000"
+db_aad_admin_principal_name = "you@yourtenant.onmicrosoft.com"
+db_aad_admin_principal_type = "User"
+
+# az ad group show -g "grp-erp-platform-admins" --query id -o tsv
+aks_admin_group_object_ids = []
+
+# Keep these OFF until the matching guidance chapter tells you to enable them.
+enable_appgw    = false
+enable_firewall = false
+enable_cosmos   = false
+
+# Lab sizing
+node_vm_size       = "Standard_D2s_v5"
+availability_zones = ["1"]
+acr_sku            = "Basic"
+postgres_sku       = "B_Standard_B1ms"
+log_daily_quota_gb = 1
+
+# NOTE: postgres_admin_password is intentionally NOT here.
+# export TF_VAR_postgres_admin_password=... before running terraform.

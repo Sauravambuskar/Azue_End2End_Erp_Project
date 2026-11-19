@@ -1,0 +1,106 @@
+{
+  "properties": {
+    "displayName": "ERP Landing Zone Baseline",
+    "policyType": "Custom",
+    "description": "The governance baseline every ERP subscription inherits. Groups the four custom definitions with the built-ins that matter most for an AKS + PaaS workload, so one assignment covers the whole posture.",
+    "metadata": {
+      "version": "1.0.0",
+      "category": "Landing Zone",
+      "owner": "platform-engineering@contoso.com"
+    },
+    "parameters": {
+      "tagEffect": {
+        "type": "String",
+        "allowedValues": ["Audit", "Deny", "Disabled"],
+        "defaultValue": "Deny",
+        "metadata": { "displayName": "Mandatory tags effect" }
+      },
+      "publicAccessEffect": {
+        "type": "String",
+        "allowedValues": ["Audit", "Deny", "Disabled"],
+        "defaultValue": "Audit",
+        "metadata": {
+          "displayName": "Public network access effect",
+          "description": "Audit at dev, Deny at prod."
+        }
+      },
+      "allowedLocations": {
+        "type": "Array",
+        "defaultValue": ["centralindia", "southindia"],
+        "metadata": { "displayName": "Allowed locations", "strongType": "location" }
+      },
+      "logAnalyticsWorkspaceId": {
+        "type": "String",
+        "defaultValue": "",
+        "metadata": {
+          "displayName": "Log Analytics workspace resource id",
+          "description": "Target for the DINE diagnostic-settings policies."
+        }
+      }
+    },
+    "policyDefinitions": [
+      {
+        "policyDefinitionReferenceId": "erp-require-tags",
+        "policyDefinitionId": "/providers/Microsoft.Management/managementGroups/mg-contoso-platform/providers/Microsoft.Authorization/policyDefinitions/erp-require-mandatory-tags",
+        "parameters": {
+          "effect": { "value": "[parameters('tagEffect')]" }
+        }
+      },
+      {
+        "policyDefinitionReferenceId": "erp-allowed-regions-skus",
+        "policyDefinitionId": "/providers/Microsoft.Management/managementGroups/mg-contoso-platform/providers/Microsoft.Authorization/policyDefinitions/erp-allowed-regions-and-skus",
+        "parameters": {
+          "allowedLocations": { "value": "[parameters('allowedLocations')]" }
+        }
+      },
+      {
+        "policyDefinitionReferenceId": "erp-no-public-ip",
+        "policyDefinitionId": "/providers/Microsoft.Management/managementGroups/mg-contoso-platform/providers/Microsoft.Authorization/policyDefinitions/erp-deny-public-ip-on-nic",
+        "parameters": {
+          "effect": { "value": "Deny" }
+        }
+      },
+      {
+        "policyDefinitionReferenceId": "erp-no-public-data-access",
+        "policyDefinitionId": "/providers/Microsoft.Management/managementGroups/mg-contoso-platform/providers/Microsoft.Authorization/policyDefinitions/erp-deny-public-network-access",
+        "parameters": {
+          "effect": { "value": "[parameters('publicAccessEffect')]" }
+        }
+      },
+      {
+        "policyDefinitionReferenceId": "builtin-kv-rbac",
+        "policyDefinitionId": "/providers/Microsoft.Authorization/policyDefinitions/12d4fa5d-1f3c-4411-8c3b-b0b0b4a0b1a0",
+        "parameters": {}
+      },
+      {
+        "policyDefinitionReferenceId": "builtin-aks-policy-addon",
+        "policyDefinitionId": "/providers/Microsoft.Authorization/policyDefinitions/0a15ec92-a229-4763-bb14-0ea34a568f8d",
+        "parameters": {}
+      },
+      {
+        "policyDefinitionReferenceId": "builtin-aks-defender",
+        "policyDefinitionId": "/providers/Microsoft.Authorization/policyDefinitions/64def556-fbad-4622-930e-72d1d5589bf5",
+        "parameters": {}
+      },
+      {
+        "policyDefinitionReferenceId": "builtin-aks-no-privileged",
+        "policyDefinitionId": "/providers/Microsoft.Authorization/policyDefinitions/95edb821-ddaf-4404-9732-666045e056b4",
+        "parameters": {}
+      }
+    ],
+    "policyDefinitionGroups": [
+      {
+        "name": "governance",
+        "displayName": "Tagging and cost governance"
+      },
+      {
+        "name": "network",
+        "displayName": "Network isolation"
+      },
+      {
+        "name": "kubernetes",
+        "displayName": "Container platform security"
+      }
+    ]
+  }
+}

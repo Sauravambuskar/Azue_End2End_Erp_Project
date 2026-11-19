@@ -1,0 +1,16 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "erp.name" . }}-config
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "erp.labels" . | nindent 4 }}
+data:
+  env: {{ .Values.config.env | quote }}
+  log_level: {{ .Values.config.logLevel | quote }}
+  auth_enabled: {{ .Values.config.authEnabled | quote }}
+  db_host: {{ .Values.config.db.host | quote }}
+  db_port: {{ .Values.config.db.port | quote }}
+  db_name: {{ .Values.config.db.name | quote }}
+  db_sslmode: {{ .Values.config.db.sslmode | quote }}
+  api_base: {{ printf "http://%s-api:%v" (include "erp.name" .) .Values.api.port | quote }}

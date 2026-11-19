@@ -1,0 +1,240 @@
+# ===========================================================================
+# ContosoERP - application CI/CD.
+#
+# This is the pipeline you will be asked to walk through in the interview.
+# The shape matters as much as the content:
+#
+#   CI  : build -> unit test -> SAST -> SCA -> secrets -> image -> image scan
+#   CD  : dev (auto) -> test (approval) -> prod (approval + change window)
+#
+# Everything reusable lives in pipelines/templates/ so that other solution
+# teams can consume the same stages - that is the JD's "shared CI/CD
+# templates for multiple solution teams" requirement.
+#
+# Security-gate philosophy used here:
+#   * Secrets scanning   -> HARD FAIL. A leaked credential is never acceptable.
+#   * SAST high/critical -> HARD FAIL.
+#   * Dependency CVEs    -> fail on Critical, warn on High (with an expiry
+#                           date on each accepted risk).
+#   * Container scan     -> fail on Critical, warn on High.
+#   * DAST               -> warn only; it runs post-deploy against dev.
+# ===========================================================================
+
+name: $(Build.DefinitionName)_$(SourceBranchName)_$(Date:yyyyMMdd)$(Rev:.r)
+
+trigger:
+  batch: true
+  branches:
+    include:
+      - main
+      - release/*
+  paths:
+    include:
+      - src/*
+      - db/*
+      - k8s/*
+      - pipelines/*
+    exclude:
+      - guidance/*
+      - docs/*
+      - README.md
+
+pr:
+  branches:
+    include:
+      - main
+  paths:
+    include:
+      - src/*
+      - db/*
+      - k8s/*
+
+variables:
+  - template: templates/variables-common.yml
+  - name: isMain
+    value: $[eq(variables['Build.SourceBranch'], 'refs/heads/main')]
+  - name: isPR
+    value: $[eq(variables['Build.Reason'], 'PullRequest')]
+  - name: imageTag
+    value: "1.0.$(Build.BuildId)"
+
+stages:
+  # =========================================================== 1. BUILD + TEST
+  - stage: build
+    displayName: Build and test
+    jobs:
+      - template: templates/job-python-quality.yml
+        parameters:
+          name: api_quality
+          displayName: API - lint, type-check, unit tests
+          workingDirectory: src/erp-api
+          coverageThreshold: 70
+
+      - template: templates/job-python-quality.yml
+        parameters:
+          name: worker_quality
+          displayName: Worker - lint, type-check, unit tests
+          workingDirectory: src/erp-worker
+          # Lower than the API's 70%: the worker is mostly SQL and I/O glue,
+          # and the valuable assertions are on the structured-log shape and
+          # the exit codes rather than on line coverage.
+          coverageThreshold: 60
+
+      - template: templates/job-node-quality.yml
+        parameters:
+          name: web_quality
+          displayName: Web - lint, unit tests and npm audit
+          workingDirectory: src/erp-web
+
+      - job: sql_review
+        displayName: Database - migration review
+        pool:
+          vmImage: ubuntu-latest
+        steps:
+          - checkout: self
+          - task: Bash@3
+            displayName: Check migrations are forward-only and numbered
+            inputs:
+              targetType: inline
+              script: |
+                set -euo pipefail
+                cd db/migrations
+                echo "Migrations found:"
+                ls -1
+
+                # Forward-only rule: no file may be modified once merged. The
+                # pipeline cannot know that, so it checks the weaker but still
+                # useful invariant: no gaps and no duplicates in the sequence.
+                nums=$(ls -1 V*__*.sql | sed -E 's/^V0*([0-9]+)__.*/\1/' | sort -n)
+                expected=1
+                for n in $nums; do
+                  if [ "$n" != "$expected" ]; then
+                    echo "##vso[task.logissue type=error]Migration sequence gap: expected V$expected, found V$n"
+                    exit 1
+                  fi
+                  expected=$((expected + 1))
+                done
+
+                # Destructive statements require an explicit opt-in comment.
+                if grep -rniE '^\s*(DROP TABLE|DROP COLUMN|TRUNCATE)' V*.sql \
+                   | grep -v 'ALLOW-DESTRUCTIVE'; then
+                  echo "##vso[task.logissue type=error]Destructive DDL without an ALLOW-DESTRUCTIVE marker"
+                  exit 1
+                fi
+                echo "Migration review passed."
+
+  # ========================================================== 2. SECURITY GATES
+  - stage: security
+    displayName: DevSecOps gates
+    dependsOn: build
+    jobs:
+      - template: templates/job-secret-scan.yml
+        parameters:
+          name: secrets
+          failOnFinding: true
+
+      - template: templates/job-sast.yml
+        parameters:
+          name: sast
+          failOnSeverity: HIGH
+
+      - template: templates/job-dependency-scan.yml
+        parameters:
+          name: sca
+          failOnSeverity: CRITICAL
+
+      - job: iac_scan
+        displayName: IaC scan - Terraform and Kubernetes
+        pool:
+          vmImage: ubuntu-latest
+        steps:
+          - checkout: self
+          - template: templates/steps-iac-scan.yml
+
+  # ============================================================ 3. CONTAINERISE
+  - stage: images
+    displayName: Build and scan images
+    dependsOn: security
+    condition: and(succeeded(), ne(variables.isPR, 'true'))
+    jobs:
+      - template: templates/job-build-image.yml
+        parameters:
+          name: api_image
+          displayName: Image - erp-api
+          repository: erp-api
+          dockerfile: src/erp-api/Dockerfile
+          buildContext: src/erp-api
+          imageTag: $(imageTag)
+
+      - template: templates/job-build-image.yml
+        parameters:
+          name: web_image
+          displayName: Image - erp-web
+          repository: erp-web
+          dockerfile: src/erp-web/Dockerfile
+          buildContext: src/erp-web
+          imageTag: $(imageTag)
+
+      - template: templates/job-build-image.yml
+        parameters:
+          name: worker_image
+          displayName: Image - erp-worker
+          repository: erp-worker
+          dockerfile: src/erp-worker/Dockerfile
+          buildContext: src/erp-worker
+          imageTag: $(imageTag)
+
+      - template: templates/job-build-image.yml
+        parameters:
+          name: migrate_image
+          displayName: Image - erp-migrate
+          repository: erp-migrate
+          dockerfile: db/Dockerfile
+          buildContext: .
+          imageTag: $(imageTag)
+
+  # ================================================================= 4. DEPLOY
+  - template: templates/stage-deploy.yml
+    parameters:
+      stageName: deploy_dev
+      displayName: Deploy to DEV
+      environmentName: erp-dev
+      dependsOn: images
+      azureSubscription: $(serviceConnectionDev)
+      aksResourceGroup: $(aksResourceGroupDev)
+      aksCluster: $(aksClusterDev)
+      valuesFile: k8s/helm/erp/values-dev.yaml
+      imageTag: $(imageTag)
+      runSmokeTests: true
+      runDast: true
+
+  - template: templates/stage-deploy.yml
+    parameters:
+      stageName: deploy_test
+      displayName: Deploy to TEST
+      environmentName: erp-test
+      dependsOn: deploy_dev
+      condition: and(succeeded(), eq(variables.isMain, 'true'))
+      azureSubscription: $(serviceConnectionTest)
+      aksResourceGroup: $(aksResourceGroupTest)
+      aksCluster: $(aksClusterTest)
+      valuesFile: k8s/helm/erp/values-dev.yaml
+      imageTag: $(imageTag)
+      runSmokeTests: true
+      runDast: false
+
+  - template: templates/stage-deploy.yml
+    parameters:
+      stageName: deploy_prod
+      displayName: Deploy to PROD
+      environmentName: erp-prod
+      dependsOn: deploy_test
+      condition: and(succeeded(), eq(variables.isMain, 'true'))
+      azureSubscription: $(serviceConnectionProd)
+      aksResourceGroup: $(aksResourceGroupProd)
+      aksCluster: $(aksClusterProd)
+      valuesFile: k8s/helm/erp/values-prod.yaml
+      imageTag: $(imageTag)
+      runSmokeTests: true
+      runDast: false
+      requireChangeTicket: true

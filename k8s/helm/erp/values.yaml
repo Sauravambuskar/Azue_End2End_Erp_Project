@@ -1,0 +1,135 @@
+# ===========================================================================
+# Default values. Environment overrides live in values-dev.yaml / values-prod.yaml
+# and are applied by the pipeline with -f.
+# ===========================================================================
+
+nameOverride: ""
+namespace: erp
+
+image:
+  registry: acrerpdevxxxxxx.azurecr.io
+  tag: "0.1.0"
+  pullPolicy: IfNotPresent
+
+# ---------------------------------------------------------------------------
+# Workload identity. Fill clientId from the Terraform output:
+#   terraform output -json workload_identity_client_ids
+# ---------------------------------------------------------------------------
+azure:
+  tenantId: ""
+  workloadIdentity:
+    enabled: true
+    api:
+      clientId: ""
+    web:
+      clientId: ""
+    worker:
+      clientId: ""
+    migrate:
+      clientId: ""
+
+# ---------------------------------------------------------------------------
+# Config. NOTHING secret goes here - secrets come from Key Vault via the CSI
+# driver, or are not needed at all (PostgreSQL uses Entra tokens).
+# ---------------------------------------------------------------------------
+config:
+  env: dev
+  logLevel: INFO
+  authEnabled: false
+  db:
+    host: psql-erp-dev-cin-01.postgres.database.azure.com
+    port: "5432"
+    name: erp
+    useManagedIdentity: true
+    sslmode: require
+  appInsights:
+    # Not a secret in the classic sense, but still injected from Key Vault.
+    secretName: erp-appinsights
+  keyVault:
+    enabled: false
+    name: ""
+    tenantId: ""
+
+api:
+  replicaCount: 2
+  port: 8000
+  resources:
+    requests:
+      cpu: 100m
+      memory: 192Mi
+    limits:
+      # No CPU limit on purpose: CPU throttling under burst is worse than
+      # letting the pod use spare capacity. Memory IS limited, because an
+      # OOM is better than a node-wide memory exhaustion.
+      memory: 512Mi
+  autoscaling:
+    enabled: true
+    minReplicas: 2
+    maxReplicas: 10
+    targetCPUUtilizationPercentage: 70
+    targetMemoryUtilizationPercentage: 80
+  podDisruptionBudget:
+    enabled: true
+    minAvailable: 1
+
+web:
+  replicaCount: 2
+  port: 3000
+  resources:
+    requests:
+      cpu: 50m
+      memory: 96Mi
+    limits:
+      memory: 256Mi
+  autoscaling:
+    enabled: true
+    minReplicas: 2
+    maxReplicas: 6
+    targetCPUUtilizationPercentage: 70
+
+worker:
+  # Runs as a CronJob, not a Deployment.
+  schedule: "*/15 * * * *"
+  job: all
+  resources:
+    requests:
+      cpu: 50m
+      memory: 96Mi
+    limits:
+      memory: 256Mi
+  backoffLimit: 2
+  activeDeadlineSeconds: 600
+
+migrate:
+  # Pre-install/pre-upgrade Helm hook.
+  enabled: true
+  image:
+    repository: erp-migrate
+    tag: ""
+  backoffLimit: 1
+
+ingress:
+  enabled: true
+  className: azure-application-gateway
+  host: ""
+  tlsSecretName: ""
+  annotations:
+    appgw.ingress.kubernetes.io/ssl-redirect: "true"
+    appgw.ingress.kubernetes.io/health-probe-path: /healthz/ready
+    appgw.ingress.kubernetes.io/request-timeout: "30"
+    appgw.ingress.kubernetes.io/backend-protocol: http
+
+networkPolicy:
+  enabled: true
+  # Namespace label of the ingress controller, for the allow-from rule.
+  ingressNamespace: kube-system
+
+serviceMonitor:
+  enabled: false
+
+nodeSelector:
+  nodepool-type: user
+
+tolerations: []
+
+topologySpreadEnabled: true
